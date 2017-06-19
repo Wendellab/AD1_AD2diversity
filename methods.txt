@@ -1,0 +1,2870 @@
+Basic stats for the sequencing:
+
+for a in A[12D][_13]*.bam; do echo $a >> reads.mapped.AD1; samtools flagstat $a | grep "mapped (" >> reads.mapped.AD1; done
+
+
+
+
+
+
+
+
+Methods for SeqCapDiversity
+
+## map and split via polyCat (BamBam v 1.3)
+	./SeqCapMap.runfile SeqCapMap.infile
+
+## Prepping ALLLLLLLL the things for PopGenome
+
+## bam2consensus needs to be done for just CDS regions; make it first
+
+	curl -O ftp://ftp.bioinfo.wsu.edu/species/Gossypium_raimondii/JGI_221_G.raimondii_Dgenome/genes/G.raimondii_JGI_221_v2.1.transcripts_exons.gff3.gz
+	gunzip G.raimondii_JGI_221_v2.1.transcripts_exons.gff3.gz
+
+## get CDS for primary transcripts only
+	grep "CDS" G.raimondii_JGI_221_v2.1.transcripts_exons.gff3 | sed '/[.][234567890][.]CDS/d' | sed '/[.][234567890][0123456789][.]CDS/d' |sed '/[.]1[1234567890][.]CDS/d' | sed '/Gorai[.]N/d' | sed 's/[.]1[.]CDS.*$//g' | sed 's/ID=//g'> D5.CDS.gff
+	
+	python aggregate_CDS.py ## was lazy, so you have to enter the input and output files in the script; output = D5.CDS_range.gff
+	dos2unix D5.CDS_range.gff  ## maybe only a problem because I ran this script using PyCharm on my PC, but if it gives weird file names with ?.fasta, this fixes it
+
+## get numbered CDS to assemble transcripts
+
+	grep "CDS" G.raimondii_JGI_221_v2.1.transcripts_exons.gff3 | sed '/[.][234567890][.]CDS/d' | sed '/[.][234567890][0123456789][.]CDS/d' |sed '/[.]1[1234567890][.]CDS/d' | sed '/Gorai[.]N/d' | sed 's/[.]1[.]CDS//g' | sed 's/ID=//g' | sed 's/-JGI.*$//g'> D5.numbered.CDS.gff
+	
+	(after bam2consensus)
+		rename .1. .01. * && rename .2. .02. * && rename .3. .03. * && rename .4. .04. * && rename .5. .05. * && rename .6. .06. * && rename .7. .07. * && rename .8. .08. * && rename .9. .09. *
+		for a in Gorai.0*.01.fasta; do python3 AMAS.py concat -i ${a%.01.fasta}* -t ${a%.01.fasta}.all.fasta -p ${a%.01.fasta}.paritions -f fasta -d dna; done
+		### https://github.com/marekborowiec/AMAS/
+
+## get gff3 with introns
+sed '/scaffold/d' G.raimondii_JGI_221_v2.1.transcripts_exons.gff3 > D5.noscaff.gff
+echo '##gff-version 3' | cat - D5.noscaff.gff > D5.noscaff.gff3
+gt gff3 -addintrons -retainids yes -o D5.introns.gff3 D5.noscaff.gff3
+egrep 'CDS|intron' D5.introns.gff3 | sed '/[.][234567890][.]CDS/d' | sed '/[.][234567890][0123456789][.]CDS/d' | sed '/[.]1[1234567890][.]CDS/d' | sed '/Gorai[.]N/d' | sed 's/[.]1[.]CDS.*$//g' | sed 's/ID=//g' | sed '/[.][23456789]-JGI_221_v2.1/d' | sed '/[.][123456789][0123465789]/d' | sed 's/[.]1-JGI.*$//g' | sed 's/-JGI.*$//g'  | sed 's/Parent=//g' > D5.gff3
+		
+	
+## from BamBam v 1.3 (only one that works on our systems), merge A/D reads with N reads, get genes sequences, forcing 2 (unphased) alleles
+	for a in *.N.bam; do samtools merge -@ 40 ${a%.namesort.N.bam}.DN.bam $a ${a%.N.bam}.D.bam; samtools merge -@ 40 ${a%.namesort.N.bam}.AN.bam $a ${a%.N.bam}.A.bam; samtools sort -@ 40 ${a%.namesort.N.bam}.AN.bam ${a%.namesort.N.bam}.AN.sort; samtools index ${a%.namesort.N.bam}.AN.sort.bam; samtools sort -@ 40 ${a%.namesort.N.bam}.DN.bam ${a%.namesort.N.bam}.DN.sort; samtools index ${a%.namesort.N.bam}.DN.sort.bam; done
+	bam2consensus -g D5.CDS_range.gff -p 2 *.sort.bam
+
+## get rid of the alignments where the sequence capture was poor (hopefully just off-targets!); also check to make sure enough sequences were kept!
+	for a in *.fasta; do ./removeNalignmentsPopGenome $a &> ${a%.fasta}.nlog; done
+	
+	#### where removeNalignmentsPopGenome is:
+			#!/usr/bin/bash
+			# Corrinne Grover, May 2016, for PopGenome
+			# takes the output from bam2consensus, splits A and D homoeologs, and retrieves only the AD1 and outgroup (AD3/6/7) sequences
+			# removes sequences from the alignment that are more than 50% Ns
+
+			# if less than two arguments supplied, display usage
+					if [  $# -le 0 ]
+					then
+							echo "This script removes sequences from an aligned fasta file that have more than 50% gaps"
+							echo "This script requires Python and PyCogent (http://pycogent.org/)"
+							# note Pycogent is stupid and cannot take passed variable names as arguments for LoadSeqs. Lame.
+							echo -e "\nUsage:\n$0 infile \n"
+							exit 1
+					fi
+
+			# user supplied -h or --help; display usage
+					if [[ ( $# == "--help") ||  $# == "-h" ]]
+					then
+							echo "Corrinne Grover, April 2015"
+							echo "This script removes sequences from an aligned fasta file that have more than 50% gaps."
+							echo "This script requires Python and PyCogent (http://pycogent.org/)"
+							echo -e "\nUsage:\n$0 infile \n"
+							exit 0
+					fi
+
+			sed 's/-/_/g' $1 | sed 's/N[.]sort[.]bam/_/g' | sed 's/N/-/g' > Pop.fasta
+			grep "\.A" Pop.fasta | grep AD[1367] | sed 's/>//g' > PopA.names
+			grep "\.D" Pop.fasta | grep AD[1367] | sed 's/>//g' > PopD.names
+			pyfasta extract --header --fasta=Pop.fasta --file PopA.names > PopA.fasta
+			pyfasta extract --header --fasta=Pop.fasta --file PopD.names > PopD.fasta
+
+			rm PopA.names
+			rm PopD.names
+
+			python - << END
+
+			import sys
+			from cogent import LoadSeqs, DNA
+
+			alnA = LoadSeqs('PopA.fasta', moltype=DNA, format='fasta')
+			filtered_alnA = alnA.omitGapSeqs(0.50)
+			filtered_alnA.writeToFile('Pop2A.fasta')
+
+			alnD = LoadSeqs('PopD.fasta', moltype=DNA, format='fasta')
+			filtered_alnD = alnD.omitGapSeqs(0.50)
+			filtered_alnD.writeToFile('Pop2D.fasta')
+
+
+			#sys.exit()
+			END
+
+			sed 's/-/N/g' Pop2A.fasta > ${1%.fasta}.clean.A.fasta
+			sed 's/-/N/g' Pop2D.fasta > ${1%.fasta}.clean.D.fasta
+
+			rm Pop2A.fasta
+			rm Pop2D.fasta
+
+			## there were 38 AD1 captured, 1 AD3, 4 AD6, and 6 AD7
+
+			AD1A=`grep ">AD1" ${1%.fasta}.clean.A.fasta | wc -l`
+			AD1D=`grep ">AD1" ${1%.fasta}.clean.D.fasta | wc -l`
+
+			otherA=`grep ">AD[367]" ${1%.fasta}.clean.A.fasta | wc -l`
+			otherD=`grep ">AD[367]" ${1%.fasta}.clean.D.fasta | wc -l`
+
+			if [ "$AD1A" -lt 25 ] || [ "$otherA" -lt 4 ]
+			then
+			  mv ${1%.fasta}.clean.A.fasta missingtoomanyPop
+			else
+			  mv ${1%.fasta}.clean.A.fasta PopGenome
+			fi
+
+			if [ "$AD1D" -lt 25 ] || [ "$otherD" -lt 4 ]
+			then
+			  mv ${1%.fasta}.clean.D.fasta missingtoomanyPop
+			else
+			  mv ${1%.fasta}.clean.D.fasta PopGenome
+			fi
+	
+	
+## check that all flowering time genes recovered:  YES
+	cat floweringtime.genes | while read line; do echo $a >> FTgenes.recovered; ls $line* | sed 's/\.clean//g' | sed 's/\.fasta//g' | sed 's/\.D5//g' | column >> FTgenes.recovered; echo >> FTgenes.recovered; done
+	
+	# where floweringtime.genes (from Grover 2015):
+			Gorai.001G014000
+			Gorai.001G015300
+			Gorai.001G053900
+			Gorai.001G075800
+			Gorai.001G089400
+			Gorai.001G126200
+			Gorai.001G216500
+			Gorai.002G006500
+			Gorai.002G027800
+			Gorai.002G028400
+			Gorai.002G142700
+			Gorai.002G166800
+			Gorai.002G177000
+			Gorai.002G238200
+			Gorai.003G007000
+			Gorai.003G025900
+			Gorai.003G061700
+			Gorai.003G098300
+			Gorai.003G105200
+			Gorai.003G118000
+			Gorai.003G139800
+			Gorai.003G175400
+			Gorai.003G176300
+			Gorai.004G027600
+			Gorai.004G079500
+			Gorai.004G088000
+			Gorai.004G141400
+			Gorai.004G169000
+			Gorai.004G247700
+			Gorai.004G264200
+			Gorai.004G264600
+			Gorai.005G015700
+			Gorai.005G050000
+			Gorai.005G077100
+			Gorai.005G138200
+			Gorai.005G240900
+			Gorai.006G075900
+			Gorai.006G082500
+			Gorai.006G096900
+			Gorai.006G117100
+			Gorai.006G155800
+			Gorai.006G192300
+			Gorai.006G253700
+			Gorai.007G087000
+			Gorai.007G113900
+			Gorai.007G130200
+			Gorai.007G137400
+			Gorai.007G166300
+			Gorai.007G170000
+			Gorai.007G191800
+			Gorai.007G214800
+			Gorai.007G215200
+			Gorai.007G215900
+			Gorai.007G278800
+			Gorai.007G367900
+			Gorai.008G009700
+			Gorai.008G059900
+			Gorai.008G077800
+			Gorai.008G092300
+			Gorai.008G112400
+			Gorai.008G115200
+			Gorai.008G131800
+			Gorai.008G132000
+			Gorai.008G139100
+			Gorai.008G168500
+			Gorai.008G198100
+			Gorai.008G233400
+			Gorai.009G004400
+			Gorai.009G004900
+			Gorai.009G068900
+			Gorai.009G104200
+			Gorai.009G181300
+			Gorai.009G236700
+			Gorai.009G258800
+			Gorai.009G268600
+			Gorai.009G271100
+			Gorai.009G276600
+			Gorai.009G280900
+			Gorai.009G302500
+			Gorai.009G313100
+			Gorai.010G023800
+			Gorai.010G035000
+			Gorai.010G085400
+			Gorai.010G123400
+			Gorai.010G183600
+			Gorai.010G231800
+			Gorai.011G011200
+			Gorai.011G040900
+			Gorai.011G106100
+			Gorai.011G106200
+			Gorai.011G139200
+			Gorai.011G188900
+			Gorai.011G190600
+			Gorai.011G200200
+			Gorai.011G201900
+			Gorai.011G213900
+			Gorai.011G241700
+			Gorai.012G150900
+			Gorai.013G080300
+			Gorai.013G096100
+			Gorai.013G163900
+			Gorai.013G203900
+			Gorai.013G224300
+
+## make individual gene gffs for PopGenome
+	for f in *.clean.A.fasta; do basename=${f%.clean.A.fasta}; grep $basename D5.CDS.gff > $basename.gff; basevalue=`cut -f 4 $basename.gff | sort -g | head -n 1`; awk -v x=$basevalue '{ print $1 "\t" $2 "\t" $3 "\t" $4-x+1 "\t" $5-x+1 "\t" $6 "\t" $7 "\t" $8 "\t" $9}' $basename.gff > gffA/$basename.A; mv $f inputA/; rm $basename.gff; basename= ; basevalue= ; done && for f in *.clean.D.fasta; do basename=${f%.clean.D.fasta}; grep $basename D5.CDS.gff > $basename.gff; basevalue=`cut -f 4 $basename.gff | sort -g | head -n 1`; awk -v x=$basevalue '{ print $1 "\t" $2 "\t" $3 "\t" $4-x+1 "\t" $5-x+1 "\t" $6 "\t" $7 "\t" $8 "\t" $9}' $basename.gff > gffD/$basename.D; mv $f inputD/; rm $basename.gff; basename= ; basevalue= ; done
+
+############ AD1 PopGenome analysis in R
+## directories are structured such that fasta files are in "input" and gff files are in "gff"
+
+library(PopGenome)
+library(ggplot2)
+library(gridExtra)
+library(TeachingDemos)
+library(plyr)
+
+PopA <- readData("inputA", gffpath="gffA")
+PopD <- readData("inputD", gffpath="gffD") 
+
+
+# specify population(s) and outgroup for As
+AD1A <- c("AD1_ARK2402.A", "AD1_CascotL7.A", "AD1_Coker315.A", "AD1_CRB252.A", "AD1_FM958.A", "AD1_LKT511.A", "AD1_Maxxa.A", "AD1_PM145.A", "AD1_TAMCOT.A", "AD1_TM1.A", "AD1_TX0044.A", "AD1_TX0480.A", "AD1_TX0665.A", "AD1_TX0672.A", "AD1_TX0786.A", "AD1_TX1009.A", "AD1_TX1037.A", "AD1_TX1046.A", "AD1_TX1055.A", "AD1_TX1107.A", "AD1_TX1110.A", "AD1_TX1120.A", "AD1_TX1182.A", "AD1_TX1226.A", "AD1_TX1228.A", "AD1_TX1236.A", "AD1_TX1748.A", "AD1_TX1982.A", "AD1_TX1988.A", "AD1_TX1996.A", "AD1_TX2002.A", "AD1_TX2089.A", "AD1_TX2090.A", "AD1_TX2091.A", "AD1_TX2092.A", "AD1_TX2094.A", "AD1_TX2095.A")
+
+AD1wA <- c("AD1_TX0044.A", "AD1_TX0480.A", "AD1_TX0665.A", "AD1_TX0672.A", "AD1_TX0786.A", "AD1_TX1009.A", "AD1_TX1037.A", "AD1_TX1046.A", "AD1_TX1055.A", "AD1_TX1107.A", "AD1_TX1110.A", "AD1_TX1120.A", "AD1_TX1182.A", "AD1_TX1226.A", "AD1_TX1228.A", "AD1_TX1236.A", "AD1_TX1748.A", "AD1_TX1982.A", "AD1_TX1988.A", "AD1_TX1996.A", "AD1_TX2002.A", "AD1_TX2090.A", "AD1_TX2091.A", "AD1_TX2092.A", "AD1_TX2094.A", "AD1_TX2095.A")
+
+AD1dA <- c("AD1_ARK2402.A", "AD1_CascotL7.A", "AD1_Coker315.A", "AD1_CRB252.A", "AD1_FM958.A", "AD1_LKT511.A", "AD1_Maxxa.A", "AD1_PM145.A", "AD1_TAMCOT.A", "AD1_TM1.A")
+
+AD3A <- c("AD3_95.A")
+
+PopA <- set.populations(PopA,list(AD1A,AD1wA,AD1dA,AD3A), diploid=TRUE)
+
+PopA <- set.outgroup(PopA,c("AD3_95.A"))
+
+
+
+# specify population(s) and outgroup for Ds
+AD1D <- c("AD1_ARK2402.D", "AD1_CascotL7.D", "AD1_Coker315.D", "AD1_CRB252.D", "AD1_FM958.D", "AD1_LKT511.D", "AD1_Maxxa.D", "AD1_PM145.D", "AD1_TAMCOT.D", "AD1_TM1.D", "AD1_TX0044.D", "AD1_TX0480.D", "AD1_TX0665.D", "AD1_TX0672.D", "AD1_TX0786.D", "AD1_TX1009.D", "AD1_TX1037.D", "AD1_TX1046.D", "AD1_TX1055.D", "AD1_TX1107.D", "AD1_TX1110.D", "AD1_TX1120.D", "AD1_TX1182.D", "AD1_TX1226.D", "AD1_TX1228.D", "AD1_TX1236.D", "AD1_TX1748.D", "AD1_TX1982.D", "AD1_TX1988.D", "AD1_TX1996.D", "AD1_TX2002.D", "AD1_TX2089.D", "AD1_TX2090.D", "AD1_TX2091.D", "AD1_TX2092.D", "AD1_TX2094.D", "AD1_TX2095.D")
+
+AD1wD <- c("AD1_TX0044.D", "AD1_TX0480.D", "AD1_TX0665.D", "AD1_TX0672.D", "AD1_TX0786.D", "AD1_TX1009.D", "AD1_TX1037.D", "AD1_TX1046.D", "AD1_TX1055.D", "AD1_TX1107.D", "AD1_TX1110.D", "AD1_TX1120.D", "AD1_TX1182.D", "AD1_TX1226.D", "AD1_TX1228.D", "AD1_TX1236.D", "AD1_TX1748.D", "AD1_TX1982.D", "AD1_TX1988.D", "AD1_TX1996.D", "AD1_TX2002.D", "AD1_TX2090.D", "AD1_TX2091.D", "AD1_TX2092.D", "AD1_TX2094.D", "AD1_TX2095.D")
+
+AD1dD <- c("AD1_ARK2402.D", "AD1_CascotL7.D", "AD1_Coker315.D", "AD1_CRB252.D", "AD1_FM958.D", "AD1_LKT511.D", "AD1_Maxxa.D", "AD1_PM145.D", "AD1_TAMCOT.D", "AD1_TM1.D")
+
+AD3D <- c("AD3_95.D")
+
+PopD <- set.populations(PopD,list(AD1D,AD1wD,AD1dD,AD3D), diploid=TRUE)
+
+PopD <- set.outgroup(PopD,c("AD3_95.D"))
+
+
+# check that the number of sites and other summary data looks ok; check the names the program expects
+get.sum.data(PopA)
+get.individuals(PopA)
+PopA@n.sites
+PopA@region.names
+PopA@region.data@populations2
+PopA.split <- splitting.data(PopA, subsites="coding", whole.data=FALSE)
+
+get.sum.data(PopD)
+get.individuals(PopD)
+PopD@n.sites
+PopD@region.names
+PopD@region.data@populations2
+
+PopD@region.data@synonymous
+PopD.split <- splitting.data(PopD, subsites="coding", whole.data=FALSE)
+
+
+
+
+
+
+
+
+# calculate neutrality statistics
+PopA <- neutrality.stats(PopA)  
+get.neutrality(PopA)[[1]]  ### AD1 all
+get.neutrality(PopA)[[2]]  ### AD1 wild
+get.neutrality(PopA)[[3]]  ### AD1 domesticate 
+get.neutrality(PopA)[[4]]  ### AD3
+
+
+
+PopD <- neutrality.stats(PopD)  
+get.neutrality(PopD)[[1]]  ### AD1 all; theta=TRUE if you want to see the thetas
+get.neutrality(PopD)[[2]]  ### AD1 wild
+get.neutrality(PopD)[[3]]  ### AD1 domesticate 
+get.neutrality(PopD)[[4]]  ### AD3
+
+
+
+
+# diversity stats
+PopA <- diversity.stats(PopA, pi=TRUE)	## pi still must be divided by @n.sites
+PopA.split <- diversity.stats(PopA.split, pi=TRUE)
+PopA@nuc.diversity.within
+
+get.diversity(PopA)[[1]]  ### AD1
+get.diversity(PopA)[[1]]  ### AD6
+get.diversity(PopA)[[1]]  ### AD7
+get.diversity(PopA)[[1]]  ### AD3
+
+PopD <- diversity.stats(PopD, pi=TRUE)	## pi still must be divided by @n.sites
+PopD.split <- diversity.stats(PopD.split, pi=TRUE)
+PopD@nuc.diversity.within
+
+get.diversity(PopD)[[1]]  ### AD1
+get.diversity(PopD)[[1]]  ### AD6
+get.diversity(PopD)[[1]]  ### AD7
+get.diversity(PopD)[[1]]  ### AD3
+
+
+
+
+##### True pi values, i.e., @Pi / @n.sites #####
+PopPiA <- PopA@Pi  ### this is a matrix
+PopSitesA <- PopA@n.sites  ### this is a vector
+TruePiA <- PopPiA / PopSitesA
+PiA <- as.data.frame(TruePiA)
+
+names(PiA)[1] <- "PiA.AD1"
+names(PiA)[2] <- "PiA.AD1w"
+names(PiA)[3] <- "PiA.AD1d"
+PiA[4] <- NULL
+row.names(PiA) <- gsub('.fasta', '', row.names(PiA))
+row.names(PiA) <- gsub('.clean.A', '', row.names(PiA))
+
+PiA$PiA.wildVdom <- PiA$PiA.AD1w / (PiA$PiA.AD1d + 0.000000000000001)
+PiA$PiA_Vrank <- NA
+PiA$PiA_Vrank <- rank(-PiA$PiA.wildVdom)
+
+PiA$PiA.wildLESSdom <- PiA$PiA.AD1w - PiA$PiA.AD1d
+PiA$PiA_LESS <- NA
+PiA$PiA_LESS <- rank(-PiA$PiA.wildLESSdom)
+
+save(PiA,file="PiA.Rdata")
+
+PopPiAsplit <- PopA.split@Pi  ### this is a matrix
+PopSitesAsplit <- PopA.split@n.sites  ### this is a vector
+TruePiAsplit <- PopPiAsplit / PopSitesAsplit
+PiAsplit <- as.data.frame(TruePiAsplit)
+
+names(PiAsplit)[1] <- "PiA.AD1"
+names(PiAsplit)[2] <- "PiA.AD1w"
+names(PiAsplit)[3] <- "PiA.AD1d"
+PiAsplit[4] <- NULL
+row.names(PiAsplit) <- gsub('.fasta', '', row.names(PiAsplit))
+row.names(PiAsplit) <- gsub('.clean.A', '', row.names(PiAsplit))
+
+PiAsplit$PiA.wildVdom <- PiAsplit$PiA.AD1w / (PiAsplit$PiA.AD1d + 0.000000000000001)
+PiAsplit$PiA_Vrank <- NA
+PiAsplit$PiA_Vrank <- rank(-PiAsplit$PiA.wildVdom)
+
+PiAsplit$PiA.wildLESSdom <- PiAsplit$PiA.AD1w - PiAsplit$PiA.AD1d
+PiAsplit$PiA_LESS <- NA
+PiAsplit$PiA_LESS <- rank(-PiAsplit$PiA.wildLESSdom)
+
+save(PiAsplit,file="PiA.split.Rdata")
+
+
+PopPiD <- PopD@Pi  ### this is a matrix
+PopSitesD <- PopD@n.sites  ### this is a vector
+TruePiD <- PopPiD / PopSitesD
+PiD <- as.data.frame(TruePiD)
+
+names(PiD)[1] <- "PiD.AD1"
+names(PiD)[2] <- "PiD.AD1w"
+names(PiD)[3] <- "PiD.AD1d"
+PiD[4] <- NULL
+row.names(PiD) <- gsub('.fasta', '', row.names(PiD))
+row.names(PiD) <- gsub('.clean.D', '', row.names(PiD))
+
+PiD$PiD.wildVdom <- PiD$PiD.AD1w / (PiD$PiD.AD1d + 0.000000000000001)
+PiD$PiD_Vrank <- NA
+PiD$PiD_Vrank <- rank(-PiD$PiD.wildVdom)
+
+PiD$PiD.wildLESSdom <- PiD$PiD.AD1w - PiD$PiD.AD1d
+PiD$PiD_LESS <- NA
+PiD$PiD_LESS <- rank(-PiD$PiD.wildLESSdom)
+
+save(PiD,file="PiD.Rdata")
+
+
+PopPiDsplit <- PopD.split@Pi  ### this is a matrix
+PopSitesDsplit <- PopD.split@n.sites  ### this is a vector
+TruePiDsplit <- PopPiDsplit / PopSitesDsplit
+PiDsplit <- as.data.frame(TruePiDsplit)
+
+names(PiDsplit)[1] <- "PiD.AD1"
+names(PiDsplit)[2] <- "PiD.AD1w"
+names(PiDsplit)[3] <- "PiD.AD1d"
+PiDsplit[4] <- NULL
+row.names(PiDsplit) <- gsub('.fasta', '', row.names(PiDsplit))
+row.names(PiDsplit) <- gsub('.clean.D', '', row.names(PiDsplit))
+
+PiDsplit$PiD.wildVdom <- PiDsplit$PiD.AD1w / (PiDsplit$PiD.AD1d + 0.000000000000001)
+PiDsplit$PiD_Vrank <- NA
+PiDsplit$PiD_Vrank <- rank(-PiDsplit$PiD.wildVdom)
+
+PiDsplit$PiD.wildLESSdom <- PiDsplit$PiD.AD1w - PiDsplit$PiD.AD1d
+PiDsplit$PiD_LESS <- NA
+PiDsplit$PiD_LESS <- rank(-PiDsplit$PiD.wildLESSdom)
+
+save(PiDsplit,file="PiD.split.Rdata")
+
+
+bothPi <- merge(PiA, PiD, by="row.names", all=TRUE)
+row.names(bothPi) <- bothPi$Row.names
+bothPi$Row.names <- NULL
+
+
+### PiA <- PiA[with(PiA, order(-wildVdom, AD1w)),]
+### PiA <- PiA[is.finite(PiA$wildVdom),]
+### PiA10 <- head(PiA, 50)
+
+### PiA10v <- as.vector(PiA10['wildVdom'])
+### names(PiA10v)[1] <- "AD1dAPi"
+### 
+### write.table(PiA10, file="PiA_10perc.table", quote = FALSE, sep ="\t")
+
+
+
+#########################  for Pi ggplot 
+
+PiA$gene <- row.names(PiA)
+PiA$gene <- factor(PiA$gene, levels = PiA$gene[order(PiA$PiA.AD1)])
+
+
+PiD$gene <- row.names(PiD)
+PiD$gene <- factor(PiD$gene, levels = PiD$gene[order(PiD$PiD.AD1)])
+
+
+PplotA <- ggplot(PiA, aes(x=gene, y=PiA.AD1)) + geom_point(stat="identity") + geom_point(aes(x=PiA$gene, y = PiA$PiA.AD1w), color="green") + geom_point(aes(x=PiA$gene, y = PiA$PiA.AD1d), color="blue") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+ggsave("PiA.png", plot = PplotA)
+
+noZPiA <- PiA[apply(PiA[c(1:3)],1,function(z) any(z!=0)),]
+noZPplotA <- ggplot(noZPiA, aes(x=gene, y=PiA.AD1)) + geom_point(stat="identity") + geom_point(aes(x=noZPiA$gene, y = noZPiA$PiA.AD1w), color="green") + geom_point(aes(x=noZPiA$gene, y = noZPiA$PiA.AD1d), color="blue") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+ggsave("noZPiA.png", plot = noZPplotA)
+
+PiA$gene <- row.names(PiA)
+PiA$gene <- factor(PiA$gene, levels = PiA$gene[order(PiA$chr, PiA$PiA.AD1)])
+
+PplotAbc <- ggplot(PiA, aes(x=gene, y=PiA.AD1)) + geom_point(stat="identity") + geom_point(aes(x=PiA$gene, y = PiA$PiA.AD1w), color="green") + geom_point(aes(x=PiA$gene, y = PiA$PiA.AD1d), color="blue") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+ggsave("PiAbychr.png", plot = PplotAbc)
+
+
+PplotD <- ggplot(PiD, aes(x=gene, y=PiD.AD1)) + geom_point(stat="identity") + geom_point(aes(x=PiD$gene, y = PiD$PiD.AD1w), color="green") + geom_point(aes(x=PiD$gene, y = PiD$PiD.AD1d), color="blue") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+ggsave("PiD.png", plot = PplotD)
+
+noZPiD <- PiD[apply(PiD[c(1:3)],1,function(z) any(z!=0)),]
+noZPplotD <- ggplot(noZPiD, aes(x=gene, y=PiD.AD1)) + geom_point(stat="identity") + geom_point(aes(x=noZPiD$gene, y = noZPiD$PiD.AD1w), color="green") + geom_point(aes(x=noZPiD$gene, y = noZPiD$PiD.AD1d), color="blue") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+ggsave("noZPiD.png", plot = noZPplotD)
+
+
+PiD$gene <- row.names(PiD)
+PiD$gene <- factor(PiD$gene, levels = PiD$gene[order(PiD$chr, PiD$PiD.AD1)])
+
+PplotDbc <- ggplot(PiD, aes(x=gene, y=PiD.AD1)) + geom_point(stat="identity") + geom_point(aes(x=PiD$gene, y = PiD$PiD.AD1w), color="green") + geom_point(aes(x=PiD$gene, y = PiD$PiD.AD1d), color="blue") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+ggsave("PiDbychr.png", plot = PplotDbc)
+
+
+PplotAD <- grid.arrange(PplotA,PplotD)
+ggsave("PiAD.png", plot= PplotAD)
+
+################ diversity table ###################
+
+txtStart("diversity.stats.table")
+
+st.err <- function(x) { sd(x)/sqrt(length(x)) }
+
+PiA$chr <- rownames(PiA)
+PiA$chr <- gsub("Gorai.0", "", PiA$chr)
+PiA$chr <- gsub("G.*", "", PiA$chr)
+
+PiA$all <- "all"
+aggregate(PiA.AD1 ~ all, data = PiA, mean)
+aggregate(PiA.AD1 ~ all, data = PiA, sd)
+aggregate(PiA.AD1 ~ all, data = PiA, st.err)
+aggregate(PiA.AD1w ~ all, data = PiA, mean)
+aggregate(PiA.AD1w ~ all, data = PiA, sd)
+aggregate(PiA.AD1w ~ all, data = PiA, st.err)
+aggregate(PiA.AD1d ~ all, data = PiA, mean)
+aggregate(PiA.AD1d ~ all, data = PiA, sd)
+aggregate(PiA.AD1d ~ all, data = PiA, st.err)
+
+count(PiA, "chr")
+aggregate(PiA.AD1 ~ chr, data = PiA, mean)
+aggregate(PiA.AD1 ~ chr, data = PiA, sd)
+aggregate(PiA.AD1 ~ chr, data = PiA, st.err)
+
+aggregate(PiA.AD1w ~ chr, data = PiA, mean)
+aggregate(PiA.AD1w ~ chr, data = PiA, sd)
+aggregate(PiA.AD1w ~ chr, data = PiA, st.err)
+
+aggregate(PiA.AD1d ~ chr, data = PiA, mean)
+aggregate(PiA.AD1d ~ chr, data = PiA, sd)
+aggregate(PiA.AD1d ~ chr, data = PiA, st.err)
+
+PiD$chr <- rownames(PiD)
+PiD$chr <- gsub("Gorai.0", "", PiD$chr)
+PiD$chr <- gsub("G.*", "", PiD$chr)
+
+PiD$all <- "all"
+aggregate(PiD.AD1 ~ all, data = PiD, mean)
+aggregate(PiD.AD1 ~ all, data = PiD, sd)
+aggregate(PiD.AD1 ~ all, data = PiD, st.err)
+aggregate(PiD.AD1w ~ all, data = PiD, mean)
+aggregate(PiD.AD1w ~ all, data = PiD, sd)
+aggregate(PiD.AD1w ~ all, data = PiD, st.err)
+aggregate(PiD.AD1d ~ all, data = PiD, mean)
+aggregate(PiD.AD1d ~ all, data = PiD, sd)
+aggregate(PiD.AD1d ~ all, data = PiD, st.err)
+
+
+count(PiD, "chr")
+aggregate(PiD.AD1 ~ chr, data = PiD, mean)
+aggregate(PiD.AD1 ~ chr, data = PiD, sd)
+aggregate(PiD.AD1 ~ chr, data = PiD, st.err)
+
+aggregate(PiD.AD1w ~ chr, data = PiD, mean)
+aggregate(PiD.AD1w ~ chr, data = PiD, sd)
+aggregate(PiD.AD1w ~ chr, data = PiD, st.err)
+
+aggregate(PiD.AD1d ~ chr, data = PiD, mean)
+aggregate(PiD.AD1d ~ chr, data = PiD, sd)
+aggregate(PiD.AD1d ~ chr, data = PiD, st.err)
+
+txtStop()
+
+
+
+
+
+#################################### 
+
+
+
+
+##### now do the same kind of thing for Tajima's D #####
+PopTDA <- PopA@Tajima.D
+TajA <- as.data.frame(PopTDA)
+names(TajA)[1] <- "TajA.AD1"
+names(TajA)[2] <- "TajA.AD1w"
+names(TajA)[3] <- "TajA.AD1d"
+TajA[4] <- NULL
+row.names(TajA) <- gsub('.fasta', '', row.names(TajA))
+row.names(TajA) <- gsub('.clean.A', '', row.names(TajA))
+
+TajA$TajA.wildLESSdom <- (TajA$TajA.AD1w - TajA$TajA.AD1d)
+TajA$TajA_LESS <- NA
+TajA$TajA_LESS <- rank(-TajA$TajA.wildLESSdom)
+
+save(TajA,file="TajA.Rdata")
+
+PopTDD <- PopD@Tajima.D
+TajD <- as.data.frame(PopTDD)
+names(TajD)[1] <- "TajD.AD1"
+names(TajD)[2] <- "TajD.AD1w"
+names(TajD)[3] <- "TajD.AD1d"
+TajD[4] <- NULL
+row.names(TajD) <- gsub('.fasta', '', row.names(TajD))
+row.names(TajD) <- gsub('.clean.D', '', row.names(TajD))
+
+TajD$TajD.wildLESSdom <- (TajD$TajD.AD1w - TajD$TajD.AD1d)
+TajD$TajD_LESS <- NA
+TajD$TajD_LESS <- rank(-TajD$TajD.wildLESSdom)
+
+save(TajD,file="TajD.Rdata")
+
+
+bothTaj <- merge(TajA, TajD, by="row.names", all=TRUE)
+row.names(bothTaj) <- bothTaj$Row.names
+bothTaj$Row.names <- NULL
+
+PiTaj <- merge(bothPi, bothTaj, by="row.names", all=TRUE)
+row.names(PiTaj) <- PiTaj$Row.names
+PiTaj$Row.names <- NULL
+
+
+# TajA <- TajA[with(TajA, order(-wildVdom)),]
+# TajA <- TajA[is.finite(TajA$AD1d),]
+# TajA10 <- head(TajA, 50)
+# 
+# 
+# TajA10v <- as.vector(TajA10['wildVdom'])
+# names(TajA10v)[1] <- "AD1ATaj"
+# 
+# PiTajA <- merge(PiA10v, TajA10v, by="row.names", all=TRUE)
+# PiTajA <- PiTajA[is.finite(PiTajA$AD1dATaj),]
+# 
+# write.table(TajA10, file="TajA_10perc.table", quote = FALSE, sep ="\t")
+
+#########################  for Tajima'sD ggplot
+TajA$gene <- row.names(TajA)
+TajA$gene <- factor(TajA$gene, levels = TajA$gene[order(TajA$TajA.AD1)])
+
+
+TAplot <- ggplot(TajA, aes(x=gene, y=TajA.AD1)) + geom_point(stat="identity") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + geom_point(aes(x=TajA$gene, y = TajA$TajA.AD1w), color="green") + geom_point(aes(x=TajA$gene, y = TajA$TajA.AD1d), color="blue") + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+ggsave("TajA.png", plot = TAplot)
+
+TajD$gene <- row.names(TajD)
+TajD$gene <- factor(TajD$gene, levels = TajD$gene[order(TajD$TajD.AD1)])
+
+TDplot <- ggplot(TajD, aes(x=gene, y=TajD.AD1)) + geom_point(stat="identity") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + geom_point(aes(x=TajD$gene, y = TajD$TajD.AD1w), color="green") + geom_point(aes(x=TajD$gene, y = TajD$TajD.AD1d), color="blue") + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+ggsave("TajD.png", plot = TDplot)
+
+TADplot <- grid.arrange(TAplot, TDplot)
+ggsave("TajAD.png", plot= TADplot)
+
+######################### 
+
+
+
+
+##### aaaaaaaand now for Fay and Wu's H #####
+
+
+FayWuHA <- PopA@Fay.Wu.H
+FayA <- as.data.frame(FayWuHA)
+names(FayA)[1] <- "FayA.AD1"
+names(FayA)[2] <- "FayA.AD1w"
+names(FayA)[3] <- "FayA.AD1d"
+FayA[4] <- NULL
+row.names(FayA) <- gsub('.fasta', '', row.names(FayA))
+row.names(FayA) <- gsub('.clean.A', '', row.names(FayA))
+
+FayA$FayA.domRank <- NA
+FayA$FayA.domRank <- rank(FayA$FayA.AD1d)
+
+# should we include the difference in FWH AD1 - AD1d?
+
+save(FayA,file="FayA.Rdata")
+
+
+
+
+FayWuHD <- PopD@Fay.Wu.H
+FayD <- as.data.frame(FayWuHD)
+names(FayD)[1] <- "FayD.AD1"
+names(FayD)[2] <- "FayD.AD1w"
+names(FayD)[3] <- "FayD.AD1d"
+FayD[4] <- NULL
+row.names(FayD) <- gsub('.fasta', '', row.names(FayD))
+row.names(FayD) <- gsub('.clean.D', '', row.names(FayD))
+
+FayD$FayD.domRank <- NA
+FayD$FayD.domRank <- rank(FayD$FayD.AD1d)
+
+save(FayD,file="FayD.Rdata")
+
+
+bothFay <- merge(FayA, FayD, by="row.names", all=TRUE)
+row.names(bothFay) <- bothFay$Row.names
+bothFay$Row.names <- NULL
+
+PiTajFay <- merge(PiTaj, bothFay, by="row.names", all=TRUE)
+row.names(PiTajFay) <- PiTajFay$Row.names
+PiTajFay$Row.names <- NULL
+
+
+
+# FayA <- FayA[is.finite(FayA$AD1),]
+# FayA <- FayA[is.finite(FayA$AD1d),]
+# 
+# FayA10 <- head(FayA, 50)
+# 
+# FayA10v <- as.vector(FayA10['AD1d'])
+# names(FayA10v)[1] <- "AD1AFay"
+
+
+#########################  on PC?
+FayA$gene <- row.names(FayA)
+FayA$gene <- factor(FayA$gene, levels = FayA$gene[order(FayA$FayA.AD1)])
+
+
+FAplot <- ggplot(FayA, aes(x=gene, y=FayA.AD1)) + geom_point(stat="identity") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + geom_point(aes(x=FayA$gene, y = FayA$FayA.AD1w), color="green") + geom_point(aes(x=FayA$gene, y = FayA$FayA.AD1d), color="blue") + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+ggsave("FayA.png", plot = FAplot)
+
+FayD$gene <- row.names(FayD)
+FayD$gene <- factor(FayD$gene, levels = FayD$gene[order(FayD$FayD.AD1)])
+
+FDplot <- ggplot(FayD, aes(x=gene, y=FayD.AD1)) + geom_point(stat="identity") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + geom_point(aes(x=FayD$gene, y = FayD$FayD.AD1w), color="green") + geom_point(aes(x=FayD$gene, y = FayD$FayD.AD1d), color="blue") + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+ggsave("FayD.png", plot = FDplot)
+
+FADplot <- grid.arrange(FAplot, FDplot)
+ggsave("FayAD.png", plot= FADplot)
+
+######################### 
+
+
+
+##### but wait, what about FST between wild and domesticated accessions??? #####
+PopA <- F_ST.stats(PopA)
+FSTA <- as.data.frame(t(PopA@nuc.F_ST.pairwise))
+FSTA <- FSTA[-c(1:3,5:6)]
+names(FSTA)[1] <- "FSTA_wildVdom"
+row.names(FSTA) <- gsub('.fasta', '', row.names(FSTA))
+row.names(FSTA) <- gsub('.clean.A', '', row.names(FSTA))
+
+FSTA$FSTA.Rank <- NA
+FSTA$FSTA.Rank <- rank(-FSTA$FSTA_wildVdom)
+
+save(FSTA,file="FSTA.Rdata")
+
+
+PopD <- F_ST.stats(PopD)
+FSTD <- as.data.frame(t(PopD@nuc.F_ST.pairwise))
+FSTD <- FSTD[-c(1:3,5:6)]
+names(FSTD)[1] <- "FSTD_wildVdom"
+row.names(FSTD) <- gsub('.fasta', '', row.names(FSTD))
+row.names(FSTD) <- gsub('.clean.D', '', row.names(FSTD))
+
+FSTD$FSTD.Rank <- NA
+FSTD$FSTD.Rank <- rank(-FSTD$FSTD_wildVdom)
+
+save(FSTD,file="FSTD.Rdata")
+
+
+bothFST <- merge(FSTA, FSTD, by="row.names", all=TRUE)
+row.names(bothFST) <- bothFST$Row.names
+bothFST$Row.names <- NULL
+
+PiTajFayFST <- merge(PiTajFay, bothFST, by="row.names", all=TRUE)
+row.names(PiTajFayFST) <- PiTajFayFST$Row.names
+PiTajFayFST$Row.names <- NULL
+
+write.table(PiTajFayFST, file="PiTajFayFST.table", quote = FALSE, sep ="\t")
+
+
+
+
+#########################  for FST ggplot
+FST <- bothFST
+FST$gene <- row.names(bothFST)
+FST$gene <- factor(FST$gene, levels = FST$gene[order(FST$FSTA_wildVdom)])
+
+
+FSTplot <- ggplot(FST, aes(x=gene, y=FSTA_wildVdom)) + geom_point(stat="identity", color="green") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + geom_point(aes(x=FST$gene, y = FST$FSTD_wildVdom), color="blue") + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+ggsave("FST.png", plot = FSTplot)
+
+
+######################### 
+
+
+
+
+########## now lets get some genes with good ranks! A had 576 total genes, D has total 412 genes##########
+
+finitePiA <- PiA[is.finite(PiA$PiA_Vrank),]
+length(row.names(finitePiA))
+# 576 genes with values
+
+finitePiD <- PiD[is.finite(PiD$PiD_Vrank),]
+length(row.names(finitePiD))
+# 412 genes with values
+
+finiteTajA <- TajA[is.finite(TajA$TajA.wildLESSdom),]
+length(row.names(finiteTajA))
+# 218 genes with values
+
+finiteTajD <- TajD[is.finite(TajD$TajD.wildLESSdom),]
+length(row.names(finiteTajD))
+# 173 genes with values
+
+finiteFayA <- FayA[is.finite(FayA$FayA.AD1d),]
+length(row.names(finiteFayA))
+# 227 genes with values
+
+finiteFayD <- FayD[is.finite(FayD$FayD.AD1d),]
+length(row.names(finiteFayD))
+# 178 genes with values
+
+finiteFSTA <- FSTA[is.finite(FSTA$FSTA_wildVdom),]
+length(row.names(finiteFSTA))
+# 563 genes with values
+
+finiteFSTD <- FSTD[is.finite(FSTD$FSTD_wildVdom),]
+length(row.names(finiteFSTD))
+# 403 genes with values
+
+# slice and dice
+
+tenPerc <- row.names(head(PiTajFayFST[with(PiTajFayFST, order(PiA_LESS)),],58))
+tenPerc <- append(tenPerc, row.names(head(PiTajFayFST[with(PiTajFayFST, order(PiD_LESS)),],41))) 
+tenPerc <- append(tenPerc, row.names(head(PiTajFayFST[with(PiTajFayFST, order(TajA_LESS)),],22))) 
+tenPerc <- append(tenPerc, row.names(head(PiTajFayFST[with(PiTajFayFST, order(TajD_LESS)),],17))) 
+tenPerc <- append(tenPerc, row.names(head(PiTajFayFST[with(PiTajFayFST, order(FayA.domRank)),],23))) 
+tenPerc <- append(tenPerc, row.names(head(PiTajFayFST[with(PiTajFayFST, order(FayD.domRank)),],18))) 
+tenPerc <- append(tenPerc, row.names(head(PiTajFayFST[with(PiTajFayFST, order(FSTA.Rank)),],56))) 
+tenPerc <- append(tenPerc, row.names(head(PiTajFayFST[with(PiTajFayFST, order(FSTD.Rank)),],40)))
+
+tenRank <- data.frame(table(tenPerc))
+
+tenPercA <- row.names(head(PiTajFayFST[with(PiTajFayFST, order(PiA_LESS)),],58))
+tenPercA <- append(tenPercA, row.names(head(PiTajFayFST[with(PiTajFayFST, order(TajA_LESS)),],22))) 
+tenPercA <- append(tenPercA, row.names(head(PiTajFayFST[with(PiTajFayFST, order(FayA.domRank)),],23))) 
+tenPercA <- append(tenPercA, row.names(head(PiTajFayFST[with(PiTajFayFST, order(FSTA.Rank)),],56))) 
+
+tenPercD <- row.names(head(PiTajFayFST[with(PiTajFayFST, order(PiD_LESS)),],41))
+tenPercD <- append(tenPercD, row.names(head(PiTajFayFST[with(PiTajFayFST, order(TajD_LESS)),],17))) 
+tenPercD <- append(tenPercD, row.names(head(PiTajFayFST[with(PiTajFayFST, order(FayD.domRank)),],18))) 
+tenPercD <- append(tenPercD, row.names(head(PiTajFayFST[with(PiTajFayFST, order(FSTD.Rank)),],40)))
+
+tenRankA <- data.frame(table(tenPercA))
+tenRankA <- tenRankA[with(tenRankA, order(-Freq)),]
+tenRankD <- data.frame(table(tenPercD))
+tenRankD <- tenRankD[with(tenRankD, order(-Freq)),]
+
+row.names(tenRank) <- tenRank$tenPerc
+row.names(tenRankA) <- tenRankA$tenPercA
+row.names(tenRankD) <- tenRankD$tenPercD
+tenRank$tenPerc <- NULL
+tenRankA$tenPercA <- NULL
+tenRankD$tenPercD <- NULL
+tenRankA$FreqA <- tenRankA$Freq
+tenRankD$FreqD <- tenRankD$Freq
+tenRankA$Freq <- NULL
+tenRankD$Freq <- NULL
+
+tenRank <- merge(tenRank, tenRankA, by="row.names", all=TRUE)
+row.names(tenRank) <- tenRank$Row.names
+tenRank$Row.names <- NULL
+tenRank <- merge(tenRank, tenRankD, by="row.names", all=TRUE)
+row.names(tenRank) <- tenRank$Row.names
+tenRank$Row.names <- NULL
+tenRank <- tenRank[with(tenRank, order(-Freq)),]
+
+write.table(tenRank, file="tenRank.table", quote = FALSE, sep ="\t")
+write.table(tenRankA, file="tenRankA.table", quote = FALSE, sep ="\t")
+write.table(tenRankD, file="tenRankD.table", quote = FALSE, sep ="\t")
+
+allgenes <- as.data.frame(row.names(PiTajFayFST))
+allgenes$dataset <- "all.genes"
+names(allgenes)[1] <- "gene"
+row.names(allgenes) <- allgenes$gene
+allgenes$gene <- NULL
+
+Ftable <- read.table("floweringtime.table", header = TRUE, sep = "\t", row.names=1)
+
+MStable <- merge(allgenes, Ftable, by="row.names", all=TRUE)
+row.names(MStable) <- MStable$Row.names
+MStable$Row.names <- NULL
+MStable$dataset <- NULL
+
+MStable <- merge(MStable, tenRank, by="row.names", all=TRUE)
+row.names(MStable) <- MStable$Row.names
+MStable$Row.names <- NULL
+
+Htable <- read.table("homology.table", header = TRUE, sep = "\t", row.names=1)
+names(Htable)[1] <- "Length"
+names(Htable)[2] <- "Arab"
+
+MStable <- merge(MStable, Htable, by="row.names", all.x = TRUE)
+row.names(MStable) <- MStable$Row.names
+MStable$Row.names <- NULL
+MStable$Exonic.Length <- NULL
+MStable <- MStable[c(6, 1:5, 7:8)]
+
+MStable <- MStable[with(MStable, order(Flowering.Time.Network..Grover.2015, row.names(MStable))),]
+MStable$Flowering.Time.Network..Grover.2015 <- NULL
+write.table(MStable, file="MStable.table", quote = FALSE, sep ="\t")
+
+
+
+
+# TajA <- TajA[with(TajA, order(-wildVdom)),]
+# TajA <- TajA[is.finite(TajA$AD1d),]
+# TajA10 <- head(TajA, 50)
+# 
+# 
+# TajA10v <- as.vector(TajA10['wildVdom'])
+# names(TajA10v)[1] <- "AD1ATaj"
+# 
+# PiTajA <- merge(PiA10v, TajA10v, by="row.names", all=TRUE)
+# PiTajA <- PiTajA[is.finite(PiTajA$AD1dATaj),]
+# 
+# write.table(TajA10, file="TajA_10perc.table", quote = FALSE, sep ="\t")
+
+
+
+
+
+
+# McDonald-Kreitman test
+https://cran.r-project.org/web/packages/PopGenome/vignettes/Whole_genome_analyses_using_VCF_files.pdf
+
+
+# GENOME.class <- readData("\home\Alignments")
+# GENOME.class <- set.populations(GENOME.class,list(1:3,4:8,9:12))
+# GENOME.class <- set.outgroup(GENOME.class,13)
+# GENOME.class <- introgression.stats(GENOME.class)
+# show the result:
+# GENOME.class@D
+
+
+
+
+# get.biallelic.matrix(PopTest,1)
+# PopTest@region.data@CodingSNPS
+
+# values <- GENOME.class.slide@nuc.divesity.within
+# PopGplot(values)
+
+# PopTest.exons <- splitting.data(PopTest, subsites="coding")
+# PopTest.exons <- neutrality.stats(PopTest.exons)
+
+# GENOME.class <- readData("\home\Alignments")
+# GENOME.class <- set.populations(GENOME.class,list(1:3,4:8,9:12))
+# GENOME.class <- set.outgroup(GENOME.class,13)
+# GENOME.class <- introgression.stats(GENOME.class)
+# show the result:
+# GENOME.class@D
+
+############ KaKs analysis in R -- KaKs.R
+### runs under for a in *.fasta; do echo $a; Rscript kaks.R $a ${a%.fasta}; echo "done with $a"; done
+
+library(seqinr)
+args = commandArgs(trailingOnly=TRUE)
+
+input <-read.alignment(file=args[1], format="fasta")
+outputks <- paste(args[2], "ks", sep=".")
+outputka <- paste(args[2], "ka", sep=".")
+outputkaks <- paste(args[2], "kaks", sep=".")
+
+kakas <- kaks(input, verbose=TRUE, forceUpperCase=TRUE)
+inputks <- kakas$ks
+inputka <- kakas$ka
+
+inputks <- as.matrix(inputks) 
+inputka <- as.matrix(inputka) 
+
+kadivks <- inputka/inputks
+kadivks <- as.matrix(kadivks)
+
+if(is.element("AD3_95.A", row.names(inputka))) {
+kaAD3 <- as.data.frame(inputka["AD3_95.A",])
+ksAD3 <- as.data.frame(inputks["AD3_95.A",])
+} else if(is.element("AD3_95.D", row.names(inputka))) {
+kaAD3 <- as.data.frame(inputka["AD3_95.D",])
+ksAD3 <- as.data.frame(inputks["AD3_95.D",])
+} else { print("AD3 isn't there!") }
+
+names(kaAD3)[1] <- args[2]
+names(ksAD3)[1] <- args[2]
+
+if(file.exists("Ka.table")) {
+        kaexistable <- read.table("Ka.table", header = TRUE, sep = "\t", row.names = 1)
+        kaaggtable <- merge(kaexistable, kaAD3, by="row.names", all = TRUE, suffixes=NULL)
+        row.names(kaaggtable) <- kaaggtable$Row.names
+        kaaggtable$Row.names <- NULL
+        write.table(kaaggtable, "Ka.table", quote = FALSE, sep = "\t")
+} else {
+        write.table(kaAD3, "Ka.table", quote = FALSE, sep = "\t")
+}
+
+
+if(file.exists("Ks.table")) {
+        ksexistable <- read.table("Ks.table", header = TRUE, sep = "\t", row.names = 1)
+        ksaggtable <- merge(ksexistable, ksAD3, by="row.names", all = TRUE, suffixes=NULL)
+        row.names(ksaggtable) <- ksaggtable$Row.names
+        ksaggtable$Row.names <- NULL
+        write.table(ksaggtable, "Ks.table", quote = FALSE, sep = "\t")
+} else {
+        write.table(ksAD3, "Ks.table", quote = FALSE, sep = "\t")
+}
+
+if(is.element("AD3_95.A", row.names(kadivks))) {
+vAD3 <- as.data.frame(kadivks["AD3_95.A",])
+} else if(is.element("AD3_95.D", row.names(kadivks))) {
+vAD3 <- as.data.frame(kadivks["AD3_95.D",])
+} else { print("AD3 isn't there!") }
+
+names(vAD3)[1] <- args[2]
+
+if(file.exists("KaKs.table")) {
+        existable <- read.table("KaKs.table", header = TRUE, sep = "\t", row.names = 1)
+        aggtable <- merge(existable, vAD3, by="row.names", all = TRUE, suffixes=NULL)
+        row.names(aggtable) <- aggtable$Row.names
+        aggtable$Row.names <- NULL
+        write.table(aggtable, "KaKs.table", quote = FALSE, sep = "\t")
+} else {
+        write.table(vAD3, "KaKs.table", quote = FALSE, sep = "\t")
+}
+
+write.table(inputks, outputks, quote = FALSE, sep = "\t")
+write.table(inputka, outputka, quote = FALSE, sep = "\t")
+write.table(kadivks, outputkaks, quote = FALSE, sep = "\t")
+
+############ write Pi density plots
+
+library(ggplot2)
+
+Pitable <- read.table("PiTajFayFST.table", header = TRUE, sep="\t", row.names = 1)
+Pitable <- Pitable[,c("PiA.AD1", "PiA.AD1w", "PiA.AD1d", "PiD.AD1", "PiD.AD1w", "PiD.AD1d")]
+bothPi <- na.omit(Pitable)
+
+bothPiPlot <- ggplot(bothPi, aes(x=PiA.AD1)) + geom_density(color="blue", size=1) + geom_density(aes(x=PiD.AD1), color="green", size=1)
+ggsave("bothPi.freq.png", plot = bothPiPlot)
+
+AwdPlot <- ggplot(bothPi, aes(x=PiA.AD1)) + geom_density(size=1) + geom_density(aes(x=PiA.AD1w), color="green", size=1) + geom_density(aes(x=PiA.AD1d), color="blue", size=1) + ylim(0,3500)
+ggsave("AD1A.wild.dom.freq.png", plot = AwdPlot)
+
+DwdPlot <- ggplot(bothPi, aes(x=PiD.AD1)) + geom_density(size=1) + geom_density(aes(x=PiD.AD1w), color="green", size=1) + geom_density(aes(x=PiD.AD1d), color="blue", size=1) + ylim(0,3500)
+ggsave("AD1D.wild.dom.freq.png", plot = DwdPlot)
+
+ADwPlot <- ggplot(bothPi, aes(x=PiA.AD1w)) + geom_density(color="blue", size=1) + geom_density(aes(x=PiD.AD1w), color="green", size=1)
+ggsave("AD1.wild.freq.png", plot = ADwPlot)
+
+ADdPlot <- ggplot(bothPi, aes(x=PiA.AD1d)) + geom_density(color="blue", size=1) + geom_density(aes(x=PiD.AD1d), color="green", size=1)
+ggsave("AD1.dom.freq.png", plot = ADdPlot)
+
+bothPi$AD1.AD <- bothPi$PiA.AD1 - bothPi$PiD.AD1
+bothPi$AD1.ADw <- bothPi$PiA.AD1w - bothPi$PiD.AD1w
+bothPi$AD1.ADd <- bothPi$PiA.AD1d - bothPi$PiD.AD1d
+
+
+Pidiff <- ggplot(bothPi, aes(x=AD1.AD)) + geom_density(color="blue", size=1)
+Pidiffw <- ggplot(bothPi, aes(x=AD1.ADw)) + geom_density(color="blue", size=1)
+Pidiffd <- ggplot(bothPi, aes(x=AD1.ADd)) + geom_density(color="blue", size=1)
+ggsave("AD1.AvD.freq.png", plot = Pidiff)
+ggsave("AD1.AvDw.freq.png", plot = Pidiffw)
+ggsave("AD1.AvDd.freq.png", plot = Pidiffd)
+
+
+FTgenes <- read.table("floweringtime.genes", header=FALSE)
+FTgenes <- as.vector(FTgenes$V1)
+notFTgenes <- bothPi[!rownames(bothPi) %in% FTgenes, ]
+onlyFTgenes <- bothPi[rownames(bothPi) %in% FTgenes, ]
+
+indivPi <- merge(onlyFTgenes, notFTgenes, by="row.names", all=TRUE, suffixes=c(".FT", ".nFT"))
+row.names(indivPi) <- indivPi$Row.names
+indivPi$Row.names <- NULL
+allPi <- merge(bothPi, indivPi, by="row.names", all=TRUE, suffixes=FALSE)
+row.names(allPi) <- allPi$Row.names
+allPi$Row.names <- NULL
+
+
+FTAPiPlot <- ggplot(allPi, aes(x=PiA.AD1)) + geom_density(size=1) + geom_density(aes(x=PiA.AD1.FT), color="green", size=1) + geom_density(aes(x=PiA.AD1.nFT), color="blue", size=1)
+FTDPiPlot <- ggplot(allPi, aes(x=PiD.AD1)) + geom_density(size=1) + geom_density(aes(x=PiD.AD1.FT), color="green", size=1) + geom_density(aes(x=PiD.AD1.nFT), color="blue", size=1)
+ggsave("FT.nFT.A.freq.png", plot = FTAPiPlot)
+ggsave("FT.nFT.D.freq.png", plot = FTDPiPlot)
+
+######### KaKs trial plots
+load("KaKs.Rdata")
+load("Ka.Rdata")
+load("Ks.Rdata")
+
+rotated <- as.data.frame(t(existable))
+KaksrotA <- ggplot(rotated, aes(x=AD1_TX0044.A)) + geom_density(size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0480.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0665.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0672.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0786.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1009.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1037.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1046.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1055.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1107.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1110.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1120.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1182.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1226.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1228.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1236.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1748.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1982.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1988.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1996.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2002.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2089.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2090.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2091.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2092.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2094.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2095.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2273.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_ARK2402.A), size=1, color="blue") + geom_density(aes(x=AD1_CascotL7.A), size=1, color="blue") + geom_density(aes(x=AD1_Coker315.A), size=1, color="blue") + geom_density(aes(x=AD1_CRB252.A), size=1, color="blue") + geom_density(aes(x=AD1_FM958.A), size=1, color="blue") + geom_density(aes(x=AD1_LKT511.A), size=1, color="blue") + geom_density(aes(x=AD1_Maxxa.A), size=1, color="blue") + geom_density(aes(x=AD1_PM145.A), size=1, color="blue") + geom_density(aes(x=AD1_TAMCOT.A), size=1, color="blue") + geom_density(aes(x=AD1_TM1.A), size=1, color="blue") + xlim(0,8)
+ggsave("KaKs.A.freq.png", plot = KaksrotA)
+
+KaksrotD <- ggplot(rotated, aes(x=AD1_TX0044.D)) + geom_density(size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0480.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0665.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0672.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0786.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1009.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1037.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1046.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1055.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1107.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1110.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1120.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1182.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1226.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1228.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1236.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1748.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1982.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1988.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1996.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2002.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2089.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2090.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2091.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2092.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2094.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2095.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2273.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_ARK2402.D), size=1, color="blue") + geom_density(aes(x=AD1_CascotL7.D), size=1, color="blue") + geom_density(aes(x=AD1_Coker315.D), size=1, color="blue") + geom_density(aes(x=AD1_CRB252.D), size=1, color="blue") + geom_density(aes(x=AD1_FM958.D), size=1, color="blue") + geom_density(aes(x=AD1_LKT511.D), size=1, color="blue") + geom_density(aes(x=AD1_Maxxa.D), size=1, color="blue") + geom_density(aes(x=AD1_PM145.D), size=1, color="blue") + geom_density(aes(x=AD1_TAMCOT.D), size=1, color="blue") + geom_density(aes(x=AD1_TM1.D), size=1, color="blue") + xlim(0,8)
+ggsave("KaKs.D.freq.png", plot = KaksrotD)
+
+KaKsA <- rotated[grep(".A", rownames(rotated)), ]
+KaKsA <- KaKsA[, grep("\\.A", colnames(KaKsA))]
+
+KaKsD <- rotated[grep(".D", rownames(rotated)), ]
+KaKsD <- KaKsD[, grep("\\.D", colnames(KaKsD))]
+
+row.names(KaKsD) <- gsub(".all.clean.D", "", row.names(KaKsD))
+row.names(KaKsA) <- gsub(".all.clean.A", "", row.names(KaKsA))
+
+KaKsAD <- merge(KaKsA, KaKsD, by="row.names", all=TRUE, suffixes=NULL)
+row.names(KaKsAD) <- KaKsAD$Row.names
+KaKsAD$Row.names <- NULL
+
+kaksrotAD <- ggplot(KaKsAD, aes(x=AD1_TX0044.A)) + geom_density(size=1, color="blue") + geom_density(aes(x=AD1_TX0480.A), size=1, color="blue") + geom_density(aes(x=AD1_TX0665.A), size=1, color="blue") + geom_density(aes(x=AD1_TX0672.A), size=1, color="blue") + geom_density(aes(x=AD1_TX0786.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1009.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1037.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1046.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1055.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1107.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1110.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1120.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1182.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1226.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1228.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1236.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1748.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1982.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1988.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1996.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2002.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2089.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2090.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2091.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2092.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2094.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2095.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2273.A), size=1, color="blue") + geom_density(aes(x=AD1_ARK2402.A), size=1, color="blue") + geom_density(aes(x=AD1_CascotL7.A), size=1, color="blue") + geom_density(aes(x=AD1_Coker315.A), size=1, color="blue") + geom_density(aes(x=AD1_CRB252.A), size=1, color="blue") + geom_density(aes(x=AD1_FM958.A), size=1, color="blue") + geom_density(aes(x=AD1_LKT511.A), size=1, color="blue") + geom_density(aes(x=AD1_Maxxa.A), size=1, color="blue") + geom_density(aes(x=AD1_PM145.A), size=1, color="blue") + geom_density(aes(x=AD1_TAMCOT.A), size=1, color="blue") + geom_density(aes(x=AD1_TM1.A), size=1, color="blue") + 
+geom_density(aes(x=AD1_TX0480.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0665.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0672.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0786.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1009.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1037.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1046.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1055.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1107.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1110.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1120.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1182.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1226.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1228.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1236.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1748.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1982.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1988.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1996.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2002.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2089.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2090.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2091.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2092.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2094.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2095.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2273.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_ARK2402.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_CascotL7.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_Coker315.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_CRB252.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_FM958.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_LKT511.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_Maxxa.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_PM145.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TAMCOT.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TM1.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0044.D), size=1, color="olivedrab") + xlim(0,8)
+ggsave("KaKs.AD.freq.png", plot = kaksrotAD)
+
+ksrot <- as.data.frame(t(kstab))
+
+ksrotA <- ggplot(ksrot, aes(x=AD1_TX0044.A)) + geom_density(size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0480.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0665.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0672.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0786.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1009.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1037.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1046.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1055.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1107.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1110.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1120.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1182.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1226.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1228.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1236.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1748.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1982.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1988.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1996.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2002.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2089.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2090.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2091.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2092.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2094.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2095.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2273.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_ARK2402.A), size=1, color="blue") + geom_density(aes(x=AD1_CascotL7.A), size=1, color="blue") + geom_density(aes(x=AD1_Coker315.A), size=1, color="blue") + geom_density(aes(x=AD1_CRB252.A), size=1, color="blue") + geom_density(aes(x=AD1_FM958.A), size=1, color="blue") + geom_density(aes(x=AD1_LKT511.A), size=1, color="blue") + geom_density(aes(x=AD1_Maxxa.A), size=1, color="blue") + geom_density(aes(x=AD1_PM145.A), size=1, color="blue") + geom_density(aes(x=AD1_TAMCOT.A), size=1, color="blue") + geom_density(aes(x=AD1_TM1.A), size=1, color="blue") + xlim(0,0.05)
+ggsave("Ks.A.freq.png", plot = ksrotA)
+
+ksrotD <- ggplot(ksrot, aes(x=AD1_TX0044.D)) + geom_density(size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0480.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0665.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0672.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0786.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1009.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1037.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1046.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1055.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1107.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1110.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1120.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1182.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1226.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1228.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1236.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1748.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1982.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1988.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1996.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2002.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2089.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2090.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2091.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2092.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2094.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2095.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2273.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_ARK2402.D), size=1, color="blue") + geom_density(aes(x=AD1_CascotL7.D), size=1, color="blue") + geom_density(aes(x=AD1_Coker315.D), size=1, color="blue") + geom_density(aes(x=AD1_CRB252.D), size=1, color="blue") + geom_density(aes(x=AD1_FM958.D), size=1, color="blue") + geom_density(aes(x=AD1_LKT511.D), size=1, color="blue") + geom_density(aes(x=AD1_Maxxa.D), size=1, color="blue") + geom_density(aes(x=AD1_PM145.D), size=1, color="blue") + geom_density(aes(x=AD1_TAMCOT.D), size=1, color="blue") + geom_density(aes(x=AD1_TM1.D), size=1, color="blue") + xlim(0,0.05)
+ggsave("Ks.D.freq.png", plot = ksrotD)
+
+KsA <- ksrot[grep(".A", rownames(ksrot)), ]
+KsA <- KsA[, grep("\\.A", colnames(KsA))]
+
+KsD <- ksrot[grep(".D", rownames(ksrot)), ]
+KsD <- KsD[, grep("\\.D", colnames(KsD))]
+
+row.names(KsD) <- gsub(".all.clean.D", "", row.names(KsD))
+row.names(KsA) <- gsub(".all.clean.A", "", row.names(KsA))
+
+KsAD <- merge(KsA, KsD, by="row.names", all=TRUE, suffixes=NULL)
+row.names(KsAD) <- KsAD$Row.names
+KsAD$Row.names <- NULL
+
+ksrotAD <- ggplot(KsAD, aes(x=AD1_TX0044.A)) + geom_density(size=1, color="blue") + geom_density(aes(x=AD1_TX0480.A), size=1, color="blue") + geom_density(aes(x=AD1_TX0665.A), size=1, color="blue") + geom_density(aes(x=AD1_TX0672.A), size=1, color="blue") + geom_density(aes(x=AD1_TX0786.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1009.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1037.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1046.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1055.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1107.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1110.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1120.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1182.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1226.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1228.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1236.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1748.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1982.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1988.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1996.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2002.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2089.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2090.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2091.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2092.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2094.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2095.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2273.A), size=1, color="blue") + geom_density(aes(x=AD1_ARK2402.A), size=1, color="blue") + geom_density(aes(x=AD1_CascotL7.A), size=1, color="blue") + geom_density(aes(x=AD1_Coker315.A), size=1, color="blue") + geom_density(aes(x=AD1_CRB252.A), size=1, color="blue") + geom_density(aes(x=AD1_FM958.A), size=1, color="blue") + geom_density(aes(x=AD1_LKT511.A), size=1, color="blue") + geom_density(aes(x=AD1_Maxxa.A), size=1, color="blue") + geom_density(aes(x=AD1_PM145.A), size=1, color="blue") + geom_density(aes(x=AD1_TAMCOT.A), size=1, color="blue") + geom_density(aes(x=AD1_TM1.A), size=1, color="blue") + 
+geom_density(aes(x=AD1_TX0480.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0665.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0672.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0786.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1009.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1037.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1046.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1055.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1107.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1110.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1120.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1182.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1226.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1228.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1236.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1748.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1982.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1988.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1996.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2002.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2089.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2090.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2091.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2092.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2094.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2095.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2273.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_ARK2402.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_CascotL7.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_Coker315.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_CRB252.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_FM958.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_LKT511.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_Maxxa.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_PM145.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TAMCOT.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TM1.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0044.D), size=1, color="olivedrab") + xlim(0,0.015)
+ggsave("Ks.AD.freq.png", plot = ksrotAD)
+
+
+
+karot <- as.data.frame(t(katab))
+
+karotA <- ggplot(karot, aes(x=AD1_TX0044.A)) + geom_density(size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0480.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0665.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0672.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0786.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1009.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1037.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1046.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1055.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1107.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1110.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1120.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1182.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1226.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1228.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1236.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1748.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1982.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1988.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1996.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2002.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2089.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2090.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2091.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2092.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2094.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2095.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2273.A), size=1, color="olivedrab") + geom_density(aes(x=AD1_ARK2402.A), size=1, color="blue") + geom_density(aes(x=AD1_CascotL7.A), size=1, color="blue") + geom_density(aes(x=AD1_Coker315.A), size=1, color="blue") + geom_density(aes(x=AD1_CRB252.A), size=1, color="blue") + geom_density(aes(x=AD1_FM958.A), size=1, color="blue") + geom_density(aes(x=AD1_LKT511.A), size=1, color="blue") + geom_density(aes(x=AD1_Maxxa.A), size=1, color="blue") + geom_density(aes(x=AD1_PM145.A), size=1, color="blue") + geom_density(aes(x=AD1_TAMCOT.A), size=1, color="blue") + geom_density(aes(x=AD1_TM1.A), size=1, color="blue") + xlim(0,0.02)
+ggsave("Ka.A.freq.png", plot = karotA)
+
+karotD <- ggplot(karot, aes(x=AD1_TX0044.D)) + geom_density(size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0480.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0665.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0672.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0786.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1009.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1037.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1046.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1055.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1107.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1110.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1120.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1182.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1226.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1228.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1236.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1748.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1982.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1988.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1996.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2002.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2089.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2090.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2091.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2092.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2094.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2095.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2273.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_ARK2402.D), size=1, color="blue") + geom_density(aes(x=AD1_CascotL7.D), size=1, color="blue") + geom_density(aes(x=AD1_Coker315.D), size=1, color="blue") + geom_density(aes(x=AD1_CRB252.D), size=1, color="blue") + geom_density(aes(x=AD1_FM958.D), size=1, color="blue") + geom_density(aes(x=AD1_LKT511.D), size=1, color="blue") + geom_density(aes(x=AD1_Maxxa.D), size=1, color="blue") + geom_density(aes(x=AD1_PM145.D), size=1, color="blue") + geom_density(aes(x=AD1_TAMCOT.D), size=1, color="blue") + geom_density(aes(x=AD1_TM1.D), size=1, color="blue") + xlim(0,0.02)
+ggsave("Ka.D.freq.png", plot = karotD)
+
+KaA <- karot[grep(".A", rownames(karot)), ]
+KaA <- KaA[, grep("\\.A", colnames(KaA))]
+
+KaD <- karot[grep(".D", rownames(karot)), ]
+KaD <- KaD[, grep("\\.D", colnames(KaD))]
+
+row.names(KaD) <- gsub(".all.clean.D", "", row.names(KaD))
+row.names(KaA) <- gsub(".all.clean.A", "", row.names(KaA))
+
+KaAD <- merge(KaA, KaD, by="row.names", all=TRUE, suffixes=NULL)
+row.names(KaAD) <- KaAD$Row.names
+KaAD$Row.names <- NULL
+
+karotAD <- ggplot(KaAD, aes(x=AD1_TX0044.A)) + geom_density(size=1, color="blue") + geom_density(aes(x=AD1_TX0480.A), size=1, color="blue") + geom_density(aes(x=AD1_TX0665.A), size=1, color="blue") + geom_density(aes(x=AD1_TX0672.A), size=1, color="blue") + geom_density(aes(x=AD1_TX0786.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1009.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1037.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1046.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1055.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1107.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1110.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1120.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1182.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1226.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1228.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1236.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1748.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1982.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1988.A), size=1, color="blue") + geom_density(aes(x=AD1_TX1996.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2002.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2089.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2090.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2091.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2092.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2094.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2095.A), size=1, color="blue") + geom_density(aes(x=AD1_TX2273.A), size=1, color="blue") + geom_density(aes(x=AD1_ARK2402.A), size=1, color="blue") + geom_density(aes(x=AD1_CascotL7.A), size=1, color="blue") + geom_density(aes(x=AD1_Coker315.A), size=1, color="blue") + geom_density(aes(x=AD1_CRB252.A), size=1, color="blue") + geom_density(aes(x=AD1_FM958.A), size=1, color="blue") + geom_density(aes(x=AD1_LKT511.A), size=1, color="blue") + geom_density(aes(x=AD1_Maxxa.A), size=1, color="blue") + geom_density(aes(x=AD1_PM145.A), size=1, color="blue") + geom_density(aes(x=AD1_TAMCOT.A), size=1, color="blue") + geom_density(aes(x=AD1_TM1.A), size=1, color="blue") + 
+geom_density(aes(x=AD1_TX0480.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0665.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0672.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0786.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1009.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1037.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1046.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1055.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1107.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1110.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1120.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1182.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1226.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1228.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1236.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1748.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1982.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1988.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX1996.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2002.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2089.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2090.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2091.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2092.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2094.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2095.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX2273.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_ARK2402.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_CascotL7.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_Coker315.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_CRB252.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_FM958.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_LKT511.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_Maxxa.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_PM145.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TAMCOT.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TM1.D), size=1, color="olivedrab") + geom_density(aes(x=AD1_TX0044.D), size=1, color="olivedrab") + xlim(0,0.015)
+ggsave("Ka.AD.freq.png", plot = karotAD)
+
+#######################################################################################################
+#
+# tackling gene conversion with 3seq
+#
+#######################################################################################################
+
+# first, redo bam2con with all polyploids and A diploids; D sequence will be extracted from the genome.
+bam2consensus -g D5.CDS_range.gff *.bam
+
+### prepare D genes (in /barb_SeqCap/Dgenes)
+# get bedops
+curl -O https://github.com/bedops/bedops/releases/download/v2.4.19/bedops_linux_x86_64-v2.4.19.tar.bz2
+# convert gff to bed
+convert2bed --input=gff --output=bed < D5.CDS_range.gff > D5.bed
+# move geneIDs to name column
+awk '{ print $1 "\t" $2 "\t" $3 "\t" $10 "\t" $5 "\t" $6 }' D5.bed > D5.names.bed
+# extract D genes
+bedtools getfasta -fi Dgenome2_13.fasta -bed D5.names.bed -fo Dgenes.fasta -name -s
+faidx -x Dgenes.fasta  ## from pyfaidx 0.4.7.1
+
+##### 3 seq didn't like the phylip files produced by clustalw2
+
+##### run alignments through RDP4 with all methods selected
+## 559 total alignments
+## 433 no detected conversion
+## 66 possible conversion events (of which 9/53 have been confirmed as possible; see RDP4.results.xlsx)
+## 60 “overflow errors” -- program errors not linked to alignment qualities
+
+##### reasons why our dataset cannot extensively detect gene conversion
+## our reads are only 150nt (at most)
+## our fragments average 400-600 nt
+## polyCat is set up to minimize gene conversion
+## what can we say with our data?
+#### we can look at SE AD bins of polycat to find reads where gene conversion exists in adjacent SNPs -- limited to find junctions within 150nt reads
+######## can set polyCat to a different % vote: polyCat -p 1 -v 1 -x 1 -s /home/jfw-lab-local/gmap/D5/snpindex${array[3]}/D13.snp${array[3]} ${array[4]}.sort.bam &>> ${array[4]}.log
+#### can also find regions of conversion by looking for holes in alignments which can be filled in by the AD bin
+
+##################################################################################################################
+###################################### begin AD2 analyses ######################################
+############ reduce name sizes because I think it freaks PopGenome out
+
+for a in *.fasta; do sed -i.bak 's/_[123][.]A/\.A/g' $a; sed -i.bak 's/_[123][.]D/\.D/g' $a; sed -i.bak 's/GB_/GB/g' $a; done
+
+
+############ AD2 PopGenome analysis in R
+## directories are structured such that fasta files are in "input" and gff files are in "gff"
+
+library(PopGenome)
+library(ggplot2)
+library(gridExtra)
+library(TeachingDemos)
+library(plyr)
+
+Pop2A <- readData("inputA", gffpath="gffA")
+Pop2D <- readData("inputD", gffpath="gffD") 
+
+
+# specify population(s) and outgroup for As
+
+AD2A <- c("AD2_79.A", "AD2_BF19.A", "AD2_DP340.A", "AD2_DP744.A", "AD2_DPTHO.A", "AD2_GB067.A", "AD2_GB074.A", "AD2_GB075.A", "AD2_GB077.A", "AD2_GB085.A", "AD2_GB210.A", "AD2_GB219.A", "AD2_GB223.A", "AD2_GB224.A", "AD2_GB226.A", "AD2_GB228.A", "AD2_GB236.A", "AD2_GB249.A", "AD2_GB262.A", "AD2_GB271.A", "AD2_GB282.A", "AD2_GB287.A", "AD2_GB303.A", "AD2_GB309.A", "AD2_GB313.A", "AD2_GB315.A", "AD2_GB332.A", "AD2_GB333.A", "AD2_GB339.A", "AD2_GB362.A", "AD2_GB365.A", "AD2_GB369.A", "AD2_GB385.A", "AD2_GB398.A", "AD2_GB399.A", "AD2_GB411.A", "AD2_GB413.A", "AD2_GB414.A", "AD2_GB420.A", "AD2_GB427.A", "AD2_GB604.A", "AD2_GB618.A", "AD2_GB672.A", "AD2_GB388.A", "AD2_Giza70.A", "AD2_Giza75.A", "AD2_GPS52.A", "AD2_GPS52.A", "AD2_K101.A", "AD2_PF15.A", "AD2_Phy76.A", "AD2_PS6.A", "AD2_PS7.A")
+
+ADAn2 <- c("AD2_GB319.A")
+
+AD2Aw <- c("AD2_GB0671.A", "AD2_GB0741.A", "AD2_GB0751.A", "AD2_GB3033.A", "AD2_GB309.A", "AD2_GB313.A", "AD2_GB3153.A", "AD2_GB3321.A", "AD2_GB333.A", "AD2_GB3391.A", "AD2_GB3621.A", "AD2_GB3653.A", "AD2_GB3691.A", "AD2_GB3851.A",  "AD2_GB398.A", "AD2_GB3991.A", "AD2_GB4113.A", "AD2_GB4133.A", "AD2_GB4143.A", "AD2_GB420.A", "AD2_GB6181.A", "AD2_GB6721.A", "AD2_GPS521.A","AD2_K101.A", "AD2_GPS52.A")
+
+#AD2Adoor <- c("AD2_GB2621.A", "AD2_GB2713.A", "AD2_GB2821.A", "AD2_GB2873.A", "AD2_GB4273.A", )
+
+#AD2Aobs <-c("AD2_GB0773.A", "AD2_GB085.A", "AD2_GB2101.A", "AD2_GB2191.A", "AD2_GB2233.A", "AD2_GB224.A", "AD2_GB2263.A", "AD2_GB228.A", "AD2_GB2363.A", "AD2_GB249.A", "AD2_GB6041.A", )
+
+AD2Ad <- c("AD2_379.A", "AD2_BF19.A", "AD2_DP340.A", "AD2_DP7441.A", "AD2_DPTHO1.A", "AD2_GB1388.A", "AD2_Giza701.A", "AD2_Giza75.A", "AD2_PF151.A", "AD2_Phy761.A", "AD2_PS61.A", "AD2_PS71.A")
+
+AD3A <- c("AD3_7.A", "AD3_Kah.A")
+
+Pop2A <- set.populations(Pop2A,list(AD2A,AD2Aw,AD2Ad,AD3A,ADAn2), diploid=TRUE)
+
+Pop2A <- set.outgroup(Pop2A,c("AD3_7.A", "AD3_Kah.A"))
+
+
+
+# specify population(s) and outgroup for Ds
+
+AD2D <- c("AD2_79.D", "AD2_BF19.D", "AD2_DP340.D", "AD2_DP744.D", "AD2_DPTHO.D", "AD2_GB067.D", "AD2_GB074.D", "AD2_GB075.D", "AD2_GB077.D", "AD2_GB085.D", "AD2_GB210.D", "AD2_GB219.D", "AD2_GB223.D", "AD2_GB224.D", "AD2_GB226.D", "AD2_GB228.D", "AD2_GB236.D", "AD2_GB249.D", "AD2_GB262.D", "AD2_GB271.D", "AD2_GB282.D", "AD2_GB287.D", "AD2_GB303.D", "AD2_GB309.D", "AD2_GB313.D", "AD2_GB315.D", "AD2_GB332.D", "AD2_GB333.D", "AD2_GB339.D", "AD2_GB362.D", "AD2_GB365.D", "AD2_GB369.D", "AD2_GB385.D", "AD2_GB398.D", "AD2_GB399.D", "AD2_GB411.D", "AD2_GB413.D", "AD2_GB414.D", "AD2_GB420.D", "AD2_GB427.D", "AD2_GB604.D", "AD2_GB618.D", "AD2_GB672.D", "AD2_GB388.D", "AD2_Giza70.D", "AD2_Giza75.D", "AD2_GPS52.D", "AD2_GPS52.D", "AD2_K101.D", "AD2_PF15.D", "AD2_Phy76.D", "AD2_PS6.D", "AD2_PS7.D")
+
+ADDn2 <- c("AD2_GB319.D")
+
+AD2Dw <- c("AD2_GB0671.D", "AD2_GB0741.D", "AD2_GB0751.D", "AD2_GB3033.D", "AD2_GB309.D", "AD2_GB313.D", "AD2_GB3153.D", "AD2_GB3321.D", "AD2_GB333.D", "AD2_GB3391.D", "AD2_GB3621.D", "AD2_GB3653.D", "AD2_GB3691.D", "AD2_GB3851.D",  "AD2_GB398.D", "AD2_GB3991.D", "AD2_GB4113.D", "AD2_GB4133.D", "AD2_GB4143.D", "AD2_GB420.D", "AD2_GB6181.D", "AD2_GB6721.D", "AD2_GPS521.D","AD2_K101.D", "AD2_GPS52.D")
+
+#AD2Ddoor <- c("AD2_GB2621.D", "AD2_GB2713.D", "AD2_GB2821.D", "AD2_GB2873.D", "AD2_GB4273.D", )
+
+#AD2Dobs <-c("AD2_GB0773.D", "AD2_GB085.D", "AD2_GB2101.D", "AD2_GB2191.D", "AD2_GB2233.D", "AD2_GB224.D", "AD2_GB2263.D", "AD2_GB228.D", "AD2_GB2363.D", "AD2_GB249.D", "AD2_GB6041.D", )
+
+AD2Dd <- c("AD2_379.D", "AD2_BF19.D", "AD2_DP340.D", "AD2_DP7441.D", "AD2_DPTHO1.D", "AD2_GB1388.D", "AD2_Giza701.D", "AD2_Giza75.D", "AD2_PF151.D", "AD2_Phy761.D", "AD2_PS61.D", "AD2_PS71.D")
+
+AD3D <- c("AD3_7.D", "AD3_Kah.D")
+
+Pop2D <- set.populations(Pop2D,list(AD2D,AD2Dw,AD2Dd,AD3D,ADDn2), diploid=TRUE)
+
+Pop2D <- set.outgroup(Pop2D,c("AD3_7.D", "AD3_Kah.D"))
+
+# check that the number of sites and other summary data looks ok; check the names the program expects
+get.sum.data(Pop2A)
+get.individuals(Pop2A)
+Pop2A@n.sites
+Pop2A@region.names
+Pop2A@region.data@populations2
+
+get.sum.data(Pop2D)
+get.individuals(Pop2D)
+Pop2D@n.sites
+Pop2D@region.names
+Pop2D@region.data@populations2
+
+
+# calculate neutrality statistics
+Pop2A <- neutrality.stats(Pop2A)  
+get.neutrality(Pop2A)[[1]]  ### AD2 all
+get.neutrality(Pop2A)[[2]]  ### AD2 wild
+get.neutrality(Pop2A)[[3]]  ### AD2 domesticate
+get.neutrality(Pop2A)[[4]]  ### AD3
+get.neutrality(Pop2A)[[5]]  ### AD2 non-AD2
+
+
+Pop2D <- neutrality.stats(Pop2D)  
+get.neutrality(Pop2D)[[1]]  ### AD2 all
+get.neutrality(Pop2D)[[2]]  ### AD2 wild
+get.neutrality(Pop2D)[[3]]  ### AD2 domesticate
+get.neutrality(Pop2D)[[4]]  ### AD3
+get.neutrality(Pop2D)[[5]]  ### AD2 non-AD2
+
+
+# diversity stats
+Pop2A <- diversity.stats(Pop2A, pi=TRUE)	## pi still must be divided by @n.sites
+get.diversity(Pop2A)[[1]]  ### AD2 all
+get.diversity(Pop2A)[[2]]  ### AD2 wild
+get.diversity(Pop2A)[[3]]  ### AD2 domesticate
+get.diversity(Pop2A)[[4]]  ### AD3
+get.diversity(Pop2A)[[5]]  ### AD2 non-AD2
+
+
+Pop2D <- diversity.stats(Pop2D, pi=TRUE)	## pi still must be divided by @n.sites
+get.diversity(Pop2D)[[1]]  ### AD2 all
+get.diversity(Pop2D)[[2]]  ### AD2 wild
+get.diversity(Pop2D)[[3]]  ### AD2 domesticate
+get.diversity(Pop2D)[[4]]  ### AD3
+get.diversity(Pop2D)[[5]]  ### AD2 non-AD2
+
+
+##### True pi values, i.e., @Pi / @n.sites #####
+PopPiA <- Pop2A@Pi  ### this is a matrix
+PopSitesA <- Pop2A@n.sites  ### this is a vector
+TruePiA <- PopPiA / PopSitesA
+PiA <- as.data.frame(TruePiA)
+
+names(PiA)[1] <- "PiA.AD2"
+names(PiA)[2] <- "PiA.AD2w"
+names(PiA)[3] <- "PiA.AD2d"
+PiA[4] <- NULL
+PiA[5] <- NULL
+row.names(PiA) <- gsub('.fasta', '', row.names(PiA))
+row.names(PiA) <- gsub('.clean.A', '', row.names(PiA))
+
+PiA$PiA.wildVdom <- PiA$PiA.AD2w / (PiA$PiA.AD2d + 0.000000000000001)
+PiA$PiA_Vrank <- NA
+PiA$PiA_Vrank <- rank(-PiA$PiA.wildVdom)
+
+PiA$PiA.wildLESSdom <- PiA$PiA.AD2w - PiA$PiA.AD2d
+PiA$PiA_LESS <- NA
+PiA$PiA_LESS <- rank(-PiA$PiA.wildLESSdom)
+
+save(PiA,file="PiA_AD2.Rdata")
+
+
+PopPiD <- Pop2D@Pi  ### this is a matrix
+PopSitesD <- Pop2D@n.sites  ### this is a vector
+TruePiD <- PopPiD / PopSitesD
+PiD <- as.data.frame(TruePiD)
+
+names(PiD)[1] <- "PiD.AD2"
+names(PiD)[2] <- "PiD.AD2w"
+names(PiD)[3] <- "PiD.AD2d"
+PiD[4] <- NULL
+PiD[5] <- NULL
+row.names(PiD) <- gsub('.fasta', '', row.names(PiD))
+row.names(PiD) <- gsub('.clean.D', '', row.names(PiD))
+
+PiD$PiD.wildVdom <- PiD$PiD.AD2w / (PiD$PiD.AD2d + 0.000000000000001)
+PiD$PiD_Vrank <- NA
+PiD$PiD_Vrank <- rank(-PiD$PiD.wildVdom)
+
+PiD$PiD.wildLESSdom <- PiD$PiD.AD2w - PiD$PiD.AD2d
+PiD$PiD_LESS <- NA
+PiD$PiD_LESS <- rank(-PiD$PiD.wildLESSdom)
+
+save(PiD,file="PiD_AD2.Rdata")
+
+bothPi <- merge(PiA, PiD, by="row.names", all=TRUE)
+row.names(bothPi) <- bothPi$Row.names
+bothPi$Row.names <- NULL
+
+
+### PiA <- PiA[with(PiA, order(-wildVdom, AD2w)),]
+### PiA <- PiA[is.finite(PiA$wildVdom),]
+### PiA10 <- head(PiA, 50)
+
+### PiA10v <- as.vector(PiA10['wildVdom'])
+### names(PiA10v)[1] <- "AD2dAPi"
+### 
+### write.table(PiA10, file="PiA_10perc.table", quote = FALSE, sep ="\t")
+
+
+
+#########################  for Pi ggplot 
+
+PiA$gene <- row.names(PiA)
+PiA$gene <- factor(PiA$gene, levels = PiA$gene[order(PiA$PiA.AD2)])
+
+PiD$gene <- row.names(PiD)
+PiD$gene <- factor(PiD$gene, levels = PiD$gene[order(PiD$PiD.AD2)])
+
+
+PplotA <- ggplot(PiA, aes(x=gene, y=PiA.AD2)) + geom_point(stat="identity") + geom_point(aes(x=PiA$gene, y = PiA$PiA.AD2w), color="green") + geom_point(aes(x=PiA$gene, y = PiA$PiA.AD2d), color="blue") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+ggsave("PiA_AD2.png", plot = PplotA)
+
+noZPiA <- PiA[apply(PiA[c(1:3)],1,function(z) any(z!=0)),]
+noZPplotA <- ggplot(noZPiA, aes(x=gene, y=PiA.AD2)) + geom_point(stat="identity") + geom_point(aes(x=noZPiA$gene, y = noZPiA$PiA.AD2w), color="green") + geom_point(aes(x=noZPiA$gene, y = noZPiA$PiA.AD2d), color="blue") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+ggsave("noZPiA_AD2.png", plot = noZPplotA)
+
+
+PiA$gene <- row.names(PiA)
+PiA$gene <- factor(PiA$gene, levels = PiA$gene[order(PiA$chr, PiA$PiA.AD2)])
+
+PplotAbc <- ggplot(PiA, aes(x=gene, y=PiA.AD2)) + geom_point(stat="identity") + geom_point(aes(x=PiA$gene, y = PiA$PiA.AD2w), color="green") + geom_point(aes(x=PiA$gene, y = PiA$PiA.AD2d), color="blue") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+ggsave("PiAbychrAD2.png", plot = PplotAbc)
+
+
+PplotD <- ggplot(PiD, aes(x=gene, y=PiD.AD2)) + geom_point(stat="identity") + geom_point(aes(x=PiD$gene, y = PiD$PiD.AD2w), color="green") + geom_point(aes(x=PiD$gene, y = PiD$PiD.AD2d), color="blue") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+ggsave("PiD_AD2.png", plot = PplotD)
+
+noZPiD <- PiD[apply(PiD[c(1:3)],1,function(z) any(z!=0)),]
+noZPplotD <- ggplot(noZPiD, aes(x=gene, y=PiD.AD2)) + geom_point(stat="identity") + geom_point(aes(x=noZPiD$gene, y = noZPiD$PiD.AD2w), color="green") + geom_point(aes(x=noZPiD$gene, y = noZPiD$PiD.AD2d), color="blue") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+ggsave("noZPiD_AD2.png", plot = noZPplotD)
+
+
+PiD$gene <- row.names(PiD)
+PiD$gene <- factor(PiD$gene, levels = PiD$gene[order(PiD$chr, PiD$PiD.AD2)])
+
+PplotDbc <- ggplot(PiD, aes(x=gene, y=PiD.AD2)) + geom_point(stat="identity") + geom_point(aes(x=PiD$gene, y = PiD$PiD.AD2w), color="green") + geom_point(aes(x=PiD$gene, y = PiD$PiD.AD2d), color="blue") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+ggsave("PiDbychrAD2.png", plot = PplotDbc)
+
+
+PplotAD <- grid.arrange(PplotA,PplotD)
+ggsave("PiAD_AD2.png", plot= PplotAD)
+
+#################################### 
+
+
+###### make Pi table ######
+PiA$chr <- rownames(PiA)
+PiA$chr <- gsub("Gorai.0", "", PiA$chr)
+PiA$chr <- gsub("G.*", "", PiA$chr)
+
+PiD$chr <- rownames(PiD)
+PiD$chr <- gsub("Gorai.0", "", PiD$chr)
+PiD$chr <- gsub("G.*", "", PiD$chr)
+
+
+txtStart("diversity.stats.AD2.table")
+
+st.err <- function(x) { sd(x)/sqrt(length(x)) }
+
+PiA$all <- "all"
+aggregate(PiA.AD2 ~ all, data = PiA, mean)
+aggregate(PiA.AD2 ~ all, data = PiA, sd)
+aggregate(PiA.AD2 ~ all, data = PiA, st.err)
+aggregate(PiA.AD2w ~ all, data = PiA, mean)
+aggregate(PiA.AD2w ~ all, data = PiA, sd)
+aggregate(PiA.AD2w ~ all, data = PiA, st.err)
+aggregate(PiA.AD2d ~ all, data = PiA, mean)
+aggregate(PiA.AD2d ~ all, data = PiA, sd)
+aggregate(PiA.AD2d ~ all, data = PiA, st.err)
+
+count(PiA, "chr")
+aggregate(PiA.AD2 ~ chr, data = PiA, mean)
+aggregate(PiA.AD2 ~ chr, data = PiA, sd)
+aggregate(PiA.AD2 ~ chr, data = PiA, st.err)
+
+aggregate(PiA.AD2w ~ chr, data = PiA, mean)
+aggregate(PiA.AD2w ~ chr, data = PiA, sd)
+aggregate(PiA.AD2w ~ chr, data = PiA, st.err)
+
+aggregate(PiA.AD2d ~ chr, data = PiA, mean)
+aggregate(PiA.AD2d ~ chr, data = PiA, sd)
+aggregate(PiA.AD2d ~ chr, data = PiA, st.err)
+
+PiD$all <- "all"
+aggregate(PiD.AD2 ~ all, data = PiD, mean)
+aggregate(PiD.AD2 ~ all, data = PiD, sd)
+aggregate(PiD.AD2 ~ all, data = PiD, st.err)
+aggregate(PiD.AD2w ~ all, data = PiD, mean)
+aggregate(PiD.AD2w ~ all, data = PiD, sd)
+aggregate(PiD.AD2w ~ all, data = PiD, st.err)
+aggregate(PiD.AD2d ~ all, data = PiD, mean)
+aggregate(PiD.AD2d ~ all, data = PiD, sd)
+aggregate(PiD.AD2d ~ all, data = PiD, st.err)
+
+count(PiD, "chr")
+aggregate(PiD.AD2 ~ chr, data = PiD, mean)
+aggregate(PiD.AD2 ~ chr, data = PiD, sd)
+aggregate(PiD.AD2 ~ chr, data = PiD, st.err)
+
+aggregate(PiD.AD2w ~ chr, data = PiD, mean)
+aggregate(PiD.AD2w ~ chr, data = PiD, sd)
+aggregate(PiD.AD2w ~ chr, data = PiD, st.err)
+
+aggregate(PiD.AD2d ~ chr, data = PiD, mean)
+aggregate(PiD.AD2d ~ chr, data = PiD, sd)
+aggregate(PiD.AD2d ~ chr, data = PiD, st.err)
+
+txtStop()
+
+###################################### end AD2 analyses ######################################
+##################################################################################################################
+
+
+##### plot diversity by chromosomes for AD1 ##### 
+library(ggplot2)
+# data
+
+chr	awd	mean	std	sterr
+0	allA	7.21E-04	1.05E-03	4.40E-05
+1	allA	5.09E-04	7.88E-04	9.23E-05
+2	allA	8.24E-04	1.45E-03	2.31E-04
+3	allA	8.03E-04	9.18E-04	1.60E-04
+4	allA	7.16E-04	9.48E-04	1.38E-04
+5	allA	6.13E-04	1.10E-03	1.56E-04
+6	allA	8.54E-04	1.68E-03	3.02E-04
+7	allA	6.87E-04	7.88E-04	1.09E-04
+8	allA	7.39E-04	1.03E-03	1.62E-04
+9	allA	8.94E-04	1.23E-03	1.49E-04
+10	allA	7.91E-04	9.54E-04	1.74E-04
+11	allA	7.75E-04	1.00E-03	1.45E-04
+12	allA	6.44E-04	8.02E-04	1.57E-04
+13	allA	6.36E-04	9.06E-04	1.45E-04
+0.3	wildA	7.59E-04	1.11E-03	4.61E-05
+1.3	wildA	5.19E-04	8.32E-04	9.74E-05
+2.3	wildA	9.20E-04	1.45E-03	2.33E-04
+3.3	wildA	7.95E-04	9.15E-04	1.59E-04
+4.3	wildA	6.93E-04	8.55E-04	1.25E-04
+5.3	wildA	6.73E-04	1.18E-03	1.67E-04
+6.3	wildA	9.47E-04	1.79E-03	3.22E-04
+7.3	wildA	7.30E-04	8.03E-04	1.11E-04
+8.3	wildA	8.01E-04	1.09E-03	1.72E-04
+9.3	wildA	9.75E-04	1.37E-03	1.66E-04
+10.3	wildA	7.79E-04	9.84E-04	1.80E-04
+11.3	wildA	8.44E-04	1.12E-03	1.61E-04
+12.3	wildA	6.17E-04	8.20E-04	1.61E-04
+13.3	wildA	6.58E-04	8.76E-04	1.40E-04
+0.6	domA	4.14E-04	9.48E-04	3.95E-05
+1.6	domA	3.35E-04	6.19E-04	7.25E-05
+2.6	domA	4.33E-04	1.55E-03	2.49E-04
+3.6	domA	5.26E-04	9.44E-04	1.64E-04
+4.6	domA	4.00E-04	9.30E-04	1.36E-04
+5.6	domA	3.14E-04	8.06E-04	1.14E-04
+6.6	domA	4.45E-04	1.19E-03	2.13E-04
+7.6	domA	3.39E-04	8.13E-04	1.13E-04
+8.6	domA	4.05E-04	8.05E-04	1.27E-04
+9.6	domA	4.55E-04	9.97E-04	1.21E-04
+10.6	domA	5.01E-04	1.00E-03	1.83E-04
+11.6	domA	4.16E-04	9.23E-04	1.33E-04
+12.6	domA	5.82E-04	8.22E-04	1.61E-04
+13.6	domA	4.26E-04	1.03E-03	1.65E-04
+0.1	allD	8.32E-04	8.49E-04	4.18E-05
+1.1	allD	5.38E-04	8.76E-04	1.16E-04
+2.1	allD	1.03E-03	8.30E-04	1.66E-04
+3.1	allD	9.22E-04	5.61E-04	1.25E-04
+4.1	allD	9.94E-04	6.43E-04	1.14E-04
+5.1	allD	9.67E-04	1.19E-03	2.38E-04
+6.1	allD	9.38E-04	8.39E-04	1.65E-04
+7.1	allD	8.03E-04	7.41E-04	1.17E-04
+8.1	allD	8.95E-04	8.72E-04	1.59E-04
+9.1	allD	7.69E-04	8.50E-04	1.14E-04
+10.1	allD	8.53E-04	7.58E-04	1.65E-04
+11.1	allD	9.97E-04	1.02E-03	1.72E-04
+12.1	allD	9.65E-04	1.02E-03	2.41E-04
+13.1	allD	5.67E-04	5.27E-04	1.01E-04
+0.4	wildD	9.13E-04	9.22E-04	4.54E-05
+1.4	wildD	5.79E-04	1.01E-03	1.34E-04
+2.4	wildD	1.16E-03	8.95E-04	1.79E-04
+3.4	wildD	1.03E-03	6.25E-04	1.40E-04
+4.4	wildD	1.08E-03	6.91E-04	1.22E-04
+5.4	wildD	1.09E-03	1.29E-03	2.58E-04
+6.4	wildD	1.03E-03	8.72E-04	1.71E-04
+7.4	wildD	8.45E-04	7.73E-04	1.22E-04
+8.4	wildD	1.01E-03	9.35E-04	1.71E-04
+9.4	wildD	8.41E-04	8.90E-04	1.19E-04
+10.4	wildD	9.46E-04	8.46E-04	1.85E-04
+11.4	wildD	1.08E-03	1.13E-03	1.91E-04
+12.4	wildD	1.02E-03	1.04E-03	2.46E-04
+13.4	wildD	6.43E-04	5.75E-04	1.11E-04
+0.7	domD	3.53E-04	7.34E-04	3.62E-05
+1.7	domD	2.39E-04	4.80E-04	6.36E-05
+2.7	domD	3.92E-04	5.35E-04	1.07E-04
+3.7	domD	2.07E-04	3.59E-04	8.04E-05
+4.7	domD	3.47E-04	5.68E-04	1.00E-04
+5.7	domD	4.66E-04	1.04E-03	2.08E-04
+6.7	domD	4.38E-04	8.37E-04	1.64E-04
+7.7	domD	4.23E-04	9.01E-04	1.42E-04
+8.7	domD	2.93E-04	7.78E-04	1.42E-04
+9.7	domD	4.28E-04	8.26E-04	1.10E-04
+10.7	domD	2.42E-04	5.09E-04	1.11E-04
+11.7	domD	5.54E-04	1.04E-03	1.76E-04
+12.7	domD	3.65E-04	7.68E-04	1.81E-04
+13.7	domD	1.08E-04	2.48E-04	4.77E-05
+
+
+AD1divtog <- read.delim("clipboard")
+
+MyTitle <- expression(paste(italic("Gossypium hirsutum"), " mean Pi by chromosome"))
+
+AD1chrplottog <- ggplot(AD1divtog, aes(x=chr, y=mean, color=awd)) + geom_errorbar(aes(ymin=mean-sterr, ymax=mean+sterr), width=0.1) + geom_point() + scale_color_manual(values=c("hotpink", "orange", "royalblue3", "medium purple", "yellow3", "seagreen"), name = "population", breaks = c("allA", "allD", "wildA", "wildD", "domA", "domD") , labels = c("total A", "total D", "wild A", "wild D", "domesticated A", "domesticated D")) + geom_vline(aes(xintercept=-0.15), color="dark grey") + geom_vline(aes(xintercept=0.85), color="dark grey") + geom_vline(aes(xintercept=1.85), color="dark grey") + geom_vline(aes(xintercept=2.85), color="dark grey") + geom_vline(aes(xintercept=3.85), color="dark grey") + geom_vline(aes(xintercept=4.85), color="dark grey") + geom_vline(aes(xintercept=5.85), color="dark grey") + geom_vline(aes(xintercept=6.85), color="dark grey") + geom_vline(aes(xintercept=7.85), color="dark grey") + geom_vline(aes(xintercept=8.85), color="dark grey") + geom_vline(aes(xintercept=9.85), color="dark grey") + geom_vline(aes(xintercept=10.85), color="dark grey") + geom_vline(aes(xintercept=11.85), color="dark grey") + geom_vline(aes(xintercept=12.85), color="dark grey") + geom_vline(aes(xintercept=13.85), color="dark grey") + labs(x = "chromosome", y = "mean Pi") + labs(title = MyTitle) + scale_x_continuous(breaks=NULL) + annotate("text", x = 0.35, y = -0.00005, label = "all") + annotate("text", x = 1.35, y = -0.00005, label = "1") + annotate("text", x = 2.35, y = -0.00005, label = "2") + annotate("text", x = 3.35, y = -0.00005, label = "3") + annotate("text", x = 4.35, y = -0.00005, label = "4") + annotate("text", x = 5.35, y = -0.00005, label = "5") + annotate("text", x = 6.35, y = -0.00005, label = "6") + annotate("text", x = 7.35, y = -0.00005, label = "7") + annotate("text", x = 8.35, y = -0.00005, label = "8") + annotate("text", x = 9.35, y = -0.00005, label = "9") + annotate("text", x = 10.35, y = -0.00005, label = "10") + annotate("text", x = 11.35, y = -0.00005, label = "11") + annotate("text", x = 12.35, y = -0.00005, label = "12") + annotate("text", x = 13.35, y = -0.00005, label = "13") + annotate("text", x = 0.35, y = 0.0014, label = "A:576   D:412") + annotate("text", x = 1.35, y = 0.0014, label = "A:73   D:57") + annotate("text", x = 2.35, y = 0.0014, label = "A:39   D:25") + annotate("text", x = 3.35, y = 0.0014, label = "A:33   D:20") + annotate("text", x = 4.35, y = 0.0014, label = "A:47   D:32") + annotate("text", x = 5.35, y = 0.0014, label = "A:50   D:25") + annotate("text", x = 6.35, y = 0.0014, label = "A:31   D:26") + annotate("text", x = 7.35, y = 0.0014, label = "A:52   D:40") + annotate("text", x = 8.35, y = 0.0014, label = "A:40   D:30") + annotate("text", x = 9.35, y = 0.0014, label = "A:68   D:56") + annotate("text", x = 10.35, y = 0.0014, label = "A:30   D:21") + annotate("text", x = 11.35, y = 0.0014, label = "A:48   D:35") + annotate("text", x = 12.35, y = 0.0014, label = "A:26   D:18") + annotate("text", x = 13.35, y = 0.0014, label = "A:39   D:27")
+
+ggsave("SummaryPibothtogbychrAD1.png", plot = AD1chrplottog)
+
+########## AD2 chr div plots #################
+library(ggplot2)
+
+chr	awd	mean	std	sterr
+0	allA	6.54E-04	1.22E-03	7.80E-05
+1	allA	7.11E-04	1.29E-03	2.53E-04
+2	allA	1.04E-03	2.54E-03	5.99E-04
+3	allA	7.00E-04	9.51E-04	3.01E-04
+4	allA	1.08E-03	1.65E-03	3.24E-04
+5	allA	4.91E-04	8.52E-04	2.20E-04
+6	allA	8.45E-04	1.44E-03	4.33E-04
+7	allA	4.82E-04	5.97E-04	1.11E-04
+8	allA	3.09E-04	3.40E-04	8.23E-05
+9	allA	4.50E-04	5.05E-04	9.22E-05
+10	allA	4.30E-04	3.09E-04	1.03E-04
+11	allA	1.08E-03	1.67E-03	3.93E-04
+12	allA	3.60E-04	6.02E-04	1.67E-04
+13	allA	4.45E-04	6.81E-04	1.49E-04
+0.3	wildA	5.57E-04	1.23E-03	7.92E-05
+1.3	wildA	7.47E-04	1.67E-03	3.27E-04
+2.3	wildA	1.06E-03	2.18E-03	5.14E-04
+3.3	wildA	6.36E-04	8.49E-04	2.68E-04
+4.3	wildA	8.69E-04	1.57E-03	3.09E-04
+5.3	wildA	1.78E-04	2.76E-04	7.12E-05
+6.3	wildA	6.66E-04	1.38E-03	4.15E-04
+7.3	wildA	6.04E-04	9.94E-04	1.85E-04
+8.3	wildA	2.13E-04	3.70E-04	8.98E-05
+9.3	wildA	2.94E-04	4.09E-04	7.48E-05
+10.3	wildA	2.74E-04	3.76E-04	1.25E-04
+11.3	wildA	1.05E-03	1.93E-03	4.55E-04
+12.3	wildA	1.84E-04	4.59E-04	1.27E-04
+13.3	wildA	2.00E-04	4.45E-04	9.71E-05
+0.6	domA	3.94E-04	1.14E-03	7.28E-05
+1.6	domA	4.99E-04	1.30E-03	2.54E-04
+2.6	domA	5.86E-04	1.62E-03	3.81E-04
+3.6	domA	5.37E-04	8.17E-04	2.58E-04
+4.6	domA	6.87E-04	1.63E-03	3.20E-04
+5.6	domA	2.00E-04	5.56E-04	1.44E-04
+6.6	domA	6.60E-04	1.71E-03	5.16E-04
+7.6	domA	2.13E-04	6.88E-04	1.28E-04
+8.6	domA	0.00E+00	0.00E+00	0.00E+00
+9.6	domA	1.37E-04	3.09E-04	5.65E-05
+10.6	domA	7.93E-05	2.38E-04	7.93E-05
+11.6	domA	9.31E-04	2.01E-03	4.74E-04
+12.6	domA	4.48E-04	1.00E-03	2.78E-04
+13.6	domA	2.42E-04	5.04E-04	1.10E-04
+0.1	allD	7.18E-04	2.06E-03	1.35E-04
+1.1	allD	6.63E-04	1.32E-03	2.46E-04
+2.1	allD	2.88E-03	7.20E-03	1.92E-03
+3.1	allD	5.99E-04	6.02E-04	2.46E-04
+4.1	allD	4.70E-04	7.19E-04	1.65E-04
+5.1	allD	1.65E-03	1.86E-03	4.52E-04
+6.1	allD	2.66E-04	3.36E-04	9.70E-05
+7.1	allD	3.38E-04	3.94E-04	7.31E-05
+8.1	allD	5.99E-04	9.56E-04	2.25E-04
+9.1	allD	3.93E-04	8.00E-04	1.49E-04
+10.1	allD	3.21E-04	2.14E-04	7.13E-05
+11.1	allD	9.04E-04	1.50E-03	3.75E-04
+12.1	allD	1.88E-04	2.29E-04	6.34E-05
+13.1	allD	5.42E-04	8.50E-04	1.90E-04
+0.4	wildD	6.46E-04	2.10E-03	1.38E-04
+1.4	wildD	6.26E-04	1.37E-03	2.53E-04
+2.4	wildD	3.08E-03	7.18E-03	1.92E-03
+3.4	wildD	9.32E-04	1.79E-03	7.31E-04
+4.4	wildD	4.36E-04	9.03E-04	2.07E-04
+5.4	wildD	1.02E-03	1.62E-03	3.93E-04
+6.4	wildD	1.85E-04	2.43E-04	7.02E-05
+7.4	wildD	2.53E-04	3.65E-04	6.78E-05
+8.4	wildD	4.18E-04	9.17E-04	2.16E-04
+9.4	wildD	3.92E-04	1.21E-03	2.24E-04
+10.4	wildD	2.48E-04	3.83E-04	1.28E-04
+11.4	wildD	9.21E-04	1.59E-03	3.98E-04
+12.4	wildD	1.44E-04	2.14E-04	5.94E-05
+13.4	wildD	4.76E-04	1.03E-03	2.30E-04
+0.7	domD	4.49E-04	1.85E-03	1.22E-04
+1.7	domD	6.70E-04	1.64E-03	3.04E-04
+2.7	domD	2.03E-03	6.46E-03	1.73E-03
+3.7	domD	4.36E-04	6.41E-04	2.62E-04
+4.7	domD	2.14E-04	5.35E-04	1.23E-04
+5.7	domD	6.31E-04	1.33E-03	3.23E-04
+6.7	domD	1.75E-04	3.70E-04	1.07E-04
+7.7	domD	2.09E-04	5.25E-04	9.74E-05
+8.7	domD	2.52E-04	8.16E-04	1.92E-04
+9.7	domD	1.35E-04	3.66E-04	6.79E-05
+10.7	domD	1.10E-04	3.29E-04	1.10E-04
+11.7	domD	7.11E-04	1.65E-03	4.13E-04
+12.7	domD	1.43E-04	2.90E-04	8.04E-05
+13.7	domD	3.80E-04	9.68E-04	2.16E-04
+
+AD2divtog <- read.delim("clipboard")
+
+MyTitle2 <- expression(paste(italic("Gossypium barbadense"), " mean Pi by chromosome"))
+
+AD2chrplottog <- ggplot(AD2divtog, aes(x=chr, y=mean, color=awd)) + geom_errorbar(aes(ymin=mean-sterr, ymax=mean+sterr), width=0.1) + geom_point() + scale_color_manual(values=c("hotpink", "orange", "royalblue3", "medium purple", "yellow3", "seagreen"), name = "population", breaks = c("allA", "allD", "wildA", "wildD", "domA", "domD") , labels = c("total A", "total D", "wild A", "wild D", "domesticated A", "domesticated D")) + geom_vline(aes(xintercept=-0.15), color="dark grey") + geom_vline(aes(xintercept=0.85), color="dark grey") + geom_vline(aes(xintercept=1.85), color="dark grey") + geom_vline(aes(xintercept=2.85), color="dark grey") + geom_vline(aes(xintercept=3.85), color="dark grey") + geom_vline(aes(xintercept=4.85), color="dark grey") + geom_vline(aes(xintercept=5.85), color="dark grey") + geom_vline(aes(xintercept=6.85), color="dark grey") + geom_vline(aes(xintercept=7.85), color="dark grey") + geom_vline(aes(xintercept=8.85), color="dark grey") + geom_vline(aes(xintercept=9.85), color="dark grey") + geom_vline(aes(xintercept=10.85), color="dark grey") + geom_vline(aes(xintercept=11.85), color="dark grey") + geom_vline(aes(xintercept=12.85), color="dark grey") + geom_vline(aes(xintercept=13.85), color="dark grey") + labs(x = "chromosome", y = "mean Pi") + labs(title = MyTitle2) + scale_x_continuous(breaks=NULL) + annotate("text", x = 0.35, y = -0.00015, label = "all") + annotate("text", x = 1.35, y = -0.00015, label = "1") + annotate("text", x = 2.35, y = -0.00015, label = "2") + annotate("text", x = 3.35, y = -0.00015, label = "3") + annotate("text", x = 4.35, y = -0.00015, label = "4") + annotate("text", x = 5.35, y = -0.00015, label = "5") + annotate("text", x = 6.35, y = -0.00015, label = "6") + annotate("text", x = 7.35, y = -0.00015, label = "7") + annotate("text", x = 8.35, y = -0.00015, label = "8") + annotate("text", x = 9.35, y = -0.00015, label = "9") + annotate("text", x = 10.35, y = -0.00015, label = "10") + annotate("text", x = 11.35, y = -0.00015, label = "11") + annotate("text", x = 12.35, y = -0.00015, label = "12") + annotate("text", x = 13.35, y = -0.00015, label = "13") + annotate("text", x = 0.35, y = 0.0055, label = "A:243   D:231") + annotate("text", x = 1.35, y = 0.0055, label = "A:26   D:29") + annotate("text", x = 2.35, y = 0.0055, label = "A:18   D:14") + annotate("text", x = 3.35, y = 0.0055, label = "A:10   D:6") + annotate("text", x = 4.35, y = 0.0055, label = "A:26   D:19") + annotate("text", x = 5.35, y = 0.0055, label = "A:15   D:17") + annotate("text", x = 6.35, y = 0.0055, label = "A:11   D:12") + annotate("text", x = 7.35, y = 0.0055, label = "A:29   D:29") + annotate("text", x = 8.35, y = 0.0055, label = "A:17   D:18") + annotate("text", x = 9.35, y = 0.0055, label = "A:30   D:29") + annotate("text", x = 10.35, y = 0.0055, label = "A:9   D:9") + annotate("text", x = 11.35, y = 0.0055, label = "A:18   D:16") + annotate("text", x = 12.35, y = 0.0055, label = "A:13   D:13") + annotate("text", x = 13.35, y = 0.0055, label = "A:21   D:20")
+
+ggsave("SummaryPibothtogbychrAD2.png", plot = AD2chrplottog)
+
+################ prepare diversity karyogram #########################
+library(ggplot2)
+library(ggbio)
+library(GenomicRanges)
+
+load("Z:\\Projects\\Duplicated_Pathways\\SeqCapMap\\PopGenome\\Ranalyses\\chromosome_view\\PiA.Rdata")
+load("Z:\\Projects\\Duplicated_Pathways\\SeqCapMap\\PopGenome\\Ranalyses\\chromosome_view\\PiD.Rdata")
+
+gffile <- read.table("D5.CDS_range.gff", row.names = 9)
+gffile$V2 <- NULL
+gffile$V3 <- NULL
+gffile$V6 <- NULL
+gffile$V8 <- NULL
+names(gffile)[1] <- "chromosome"
+names(gffile)[2] <- "start"
+names(gffile)[3] <- "end"
+names(gffile)[4] <- "strand"
+
+chrinfo <- Seqinfo(seqnames=c("Chr01", "Chr02", "Chr03", "Chr04", "Chr05", "Chr06", "Chr07", "Chr08", "Chr09", "Chr10", "Chr11", "Chr12", "Chr13"), seqlengths=c(55868233, 62769430, 45765648, 62178258, 64140413, 51074515, 60982465, 57128820, 70713020, 62175169, 62681010, 35429946, 58321163), isCircular=c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE))
+
+Abedish <- merge(gffile, PiA, by="row.names", all.y=TRUE)
+row.names(Abedish) <- Abedish$Row.names
+Abedish$Row.names <- NULL
+PiA$PiA.wildVdom <- NULL
+PiA$PiA.wildLESSdom <- NULL
+PiA$PiA_LESS <- NULL
+PiA$PiA_Vrank <- NULL
+
+Dbedish <- merge(gffile, PiD, by="row.names", all.y=TRUE)
+row.names(Dbedish) <- Dbedish$Row.names
+Dbedish$Row.names <- NULL
+PiD$PiD.wildVdom <- NULL
+PiD$PiD.wildLESSdom <- NULL
+PiD$PiD_LESS <- NULL
+PiD$PiD_Vrank <- NULL
+
+Akaryo <- makeGRangesFromDataFrame(Abedish, keep.extra.columns=TRUE, seqnames.field=c("chromosome"), start.field=c("start"), end.field=c("end"), strand.field=c("strand"))
+
+Dkaryo <- makeGRangesFromDataFrame(Dbedish, keep.extra.columns=TRUE, seqnames.field=c("chromosome"), start.field=c("start"), end.field=c("end"), strand.field=c("strand"))
+#autoplot(chrinfo, layout="karyogram") + layout_karyogram(Dkaryo, geom="rect") + layout_karyogram(Dkaryo, aes(x=start, y=PiD.AD1), ylim = c(10,30), geom="line", color="blue")
+
+chromosomes <- autoplot(chrinfo, layout="karyogram") + layout_karyogram(Akaryo, geom="rect", color="black") + layout_karyogram(Dkaryo, geom="rect", color="black") + layout_karyogram(Akaryo, aes(x=start, y=PiA.AD1), ylim = c(10,150), geom="point", color="blue", size=2) + layout_karyogram(Dkaryo, aes(x=start, y=PiD.AD1), ylim = c(10,150), geom="point", color="green4", size=2, shape=17) + labs(x = NULL) + scale_fill_manual(values=c("green", "blue"), labels=c("A homoeologs", "D homoeologs"))
+
+png("AD1chromosomediversityplots.png", width = 1600, height = 800)
+print(chromosomes)
+dev.off()
+
+
+################ prepare diversity karyogram AD2 #########################
+
+library(ggplot2)
+library(ggbio)
+library(GenomicRanges)
+
+load("Z:\\Projects\\Duplicated_Pathways\\SeqCapMap\\PopGenome\\Ranalyses\\AD2\\chromosome_view\\PiA_AD2.Rdata")
+load("Z:\\Projects\\Duplicated_Pathways\\SeqCapMap\\PopGenome\\Ranalyses\\AD2\\chromosome_view\\PiD_AD2.Rdata")
+
+gffile <- read.table("D5.CDS_range.gff", row.names = 9)
+gffile$V2 <- NULL
+gffile$V3 <- NULL
+gffile$V6 <- NULL
+gffile$V8 <- NULL
+names(gffile)[1] <- "chromosome"
+names(gffile)[2] <- "start"
+names(gffile)[3] <- "end"
+names(gffile)[4] <- "strand"
+
+chrinfo <- Seqinfo(seqnames=c("Chr01", "Chr02", "Chr03", "Chr04", "Chr05", "Chr06", "Chr07", "Chr08", "Chr09", "Chr10", "Chr11", "Chr12", "Chr13"), seqlengths=c(55868233, 62769430, 45765648, 62178258, 64140413, 51074515, 60982465, 57128820, 70713020, 62175169, 62681010, 35429946, 58321163), isCircular=c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE))
+
+PiA$PiA.wildVdom <- NULL
+PiA$PiA.wildLESSdom <- NULL
+PiA$PiA_LESS <- NULL
+PiA$PiA_Vrank <- NULL
+PiA[4] <- NULL
+
+PiD$PiD.wildVdom <- NULL
+PiD$PiD.wildLESSdom <- NULL
+PiD$PiD_LESS <- NULL
+PiD$PiD_Vrank <- NULL
+PiD[4] <- NULL
+
+Abedish <- merge(gffile, PiA, by="row.names", all.y=TRUE)
+row.names(Abedish) <- Abedish$Row.names
+Abedish$Row.names <- NULL
+
+
+Dbedish <- merge(gffile, PiD, by="row.names", all.y=TRUE)
+row.names(Dbedish) <- Dbedish$Row.names
+Dbedish$Row.names <- NULL
+
+
+Akaryo <- makeGRangesFromDataFrame(Abedish, keep.extra.columns=TRUE, seqnames.field=c("chromosome"), start.field=c("start"), end.field=c("end"), strand.field=c("strand"))
+
+Dkaryo <- makeGRangesFromDataFrame(Dbedish, keep.extra.columns=TRUE, seqnames.field=c("chromosome"), start.field=c("start"), end.field=c("end"), strand.field=c("strand"))
+
+chromosomes <- autoplot(chrinfo, layout="karyogram") + layout_karyogram(Akaryo, geom="rect", color="black") + layout_karyogram(Dkaryo, geom="rect", color="black") + layout_karyogram(Akaryo, aes(x=start, y=PiA.AD2), ylim = c(10,150), geom="point", color="blue", size=2) + layout_karyogram(Dkaryo, aes(x=start, y=PiD.AD2), ylim = c(10,150), geom="point", color="green4", size=2, shape=17) + labs(x = NULL) + scale_fill_manual(values=c("green", "blue"), labels=c("A homoeologs", "D homoeologs"))
+
+png("AD2chromosomediversityplots.png", width = 1200, height = 600)
+print(chromosomes)
+dev.off()
+
+############ write Pi density plots for AD2
+
+library(ggplot2)
+
+load("Z:\\Projects\\Duplicated_Pathways\\SeqCapMap\\PopGenome\\Ranalyses\\AD2\\PiA_AD2.Rdata")
+load("Z:\\Projects\\Duplicated_Pathways\\SeqCapMap\\PopGenome\\Ranalyses\\AD2\\PiD_AD2.Rdata")
+
+bothPi2 <- merge(PiA, PiD, by="row.names", all=FALSE)
+row.names(bothPi2) <- bothPi2$Row.names
+bothPi2$Row.names <- NULL
+
+bothPiPlot <- ggplot(bothPi2, aes(x=PiA.AD2)) + geom_density(color="blue", size=1) + geom_density(aes(x=PiD.AD2), color="green", size=1) + geom_vline(xintercept = 0, size=0.75) + geom_hline(yintercept = 0, size=0.75) + xlim(0,0.015)
+ggsave("bothPiAD2.freq.png", plot = bothPiPlot)
+
+bothPi2$AD2.AD <- bothPi2$PiA.AD2 - bothPi2$PiD.AD2
+bothPi2$AD2.ADw <- bothPi2$PiA.AD2w - bothPi2$PiD.AD2w
+bothPi2$AD2.ADd <- bothPi2$PiA.AD2d - bothPi2$PiD.AD2d
+
+table(sign(bothPi2$AD2.AD))
+# -1  0  1 
+# 78 19 94 
+
+table(sign(bothPi2$AD2.ADw))
+# -1  0  1 
+# 49 75 67 
+
+table(sign(bothPi2$AD2.ADd))
+# -1   0   1 
+# 32 119  40 
+
+Pidiff <- ggplot(bothPi2, aes(x=AD2.AD)) + geom_density(color="blue", size=1) + geom_hline(yintercept = 0, size=0.75) + geom_vline(xintercept = 0, size=0.5) + xlim(-0.01,0.01)
+Pidiffw <- ggplot(bothPi2, aes(x=AD2.ADw)) + geom_density(color="blue", size=1) + geom_hline(yintercept = 0, size=0.75) + geom_vline(xintercept = 0, size=0.5) + xlim(-0.01,0.01)
+Pidiffd <- ggplot(bothPi2, aes(x=AD2.ADd)) + geom_density(color="blue", size=1) + geom_hline(yintercept = 0, size=0.75) + geom_vline(xintercept = 0, size=0.5) + xlim(-0.01,0.01)
+ggsave("AD2.AvD.freq.png", plot = Pidiff)
+ggsave("AD2.AvDw.freq.png", plot = Pidiffw)
+ggsave("AD2.AvDd.freq.png", plot = Pidiffd)
+
+ADwPlot <- ggplot(bothPi2, aes(x=PiA.AD2w)) + geom_density(color="blue", size=1) + geom_density(aes(x=PiD.AD2w), color="green", size=1) + geom_hline(yintercept = 0, size=0.75) + geom_vline(xintercept = 0, size=0.75)
+ggsave("AD2.wild.freq.png", plot = ADwPlot)
+
+ADdPlot <- ggplot(bothPi2, aes(x=PiA.AD2d)) + geom_density(color="blue", size=1) + geom_density(aes(x=PiD.AD2d), color="green", size=1) + geom_hline(yintercept = 0, size=0.75) + geom_vline(xintercept = 0, size=0.75) + xlim(0,0.008)
+ggsave("AD2.dom.freq.png", plot = ADdPlot)
+
+
+##############################
+
+wilcox.test(Piall$PiA.AD1, Piall$PiD.AD1, data=Piall)
+
+observed <- c(173,155)
+expected <- c(0.5,0.5)
+chisq.test(x = observed, p = expected)
+
+############################
+
+interSnp -r Dgenome2_13.fasta -g D5.CDS_range.gff -v AD1.vcf *.bam
+
+make vcf  -- OLD  ***********************************
+
+[corrinne@biocrunch mpileup]$ egrep 'NS=26|NS=27|NS=28|NS=29|NS=30|NS=31|NS=32|NS=33|NS=34|NS=35|NS=36|NS=37|NS=38|NS=39|NS=40' AD1.vcf > AD1.NSpruned.vcf
+
+[corrinne@biocrunch mpileup]$ grep "Chr" AD1.NSpruned.vcf | wc -l
+487,466
+[corrinne@biocrunch mpileup]$ grep "Chr" AD1.vcf | wc -l
+2,142,242
+
+[corrinne@biocrunch mpileup]$ egrep '0/1|1/0' AD1.NSpruned.vcf | wc -l  ### only take lines that have at least one polyploid with both; this prunes out both autapomorphies in A/D AND ancient gene conversions
+402,265
+
+7536  grep "#" AD1.vcf > AD1.header.vcf
+7537  cat AD1.conversion.vcf >> AD1.header.vcf
+
+ 7579  awk '$10 ~ /[1]\/[1]/' AD1.header.vcf | awk '$11 ~ /[.]\/[.]/' | awk '$10!=$11{print}' > AD1.monoA1.vcf
+ 7580  awk '$11 ~ /[1]\/[1]/' AD1.header.vcf | awk '$10 ~ /[.]\/[.]/' | awk '$10!=$11{print}' > AD1.monoA2.vcf
+ 7581  awk '$11 ~ /[1]\/[1]/' AD1.header.vcf | awk '$10 ~ /[1]\/[1]/' | awk '$10!=$11{print}' > AD1.monoAb.vcf
+ cat AD1.monoA1.vcf AD1.monoA2.vcf AD1.monoAb.vcf | sort -k1,1 -k 2,2n > AD1.geneconversion.pruned.vcf
+grep "#" AD1.vcf > AD1.headerstable.vcf
+
+
+cat AD1.headerstable.vcf AD1.geneconversion.pruned.vcf > AD1.geneconversion.final.vcf
+
+for a in 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49; do cut -f$a AD1.geneconversion.final.vcf | grep "sort" >> report.out; cut -f$a AD1.geneconversion.final.vcf | egrep '0/1|1/0' | wc -l >> report.out; cut -f$a AD1.geneconversion.final.vcf | egrep '0/0|1/1' | wc -l >> report.out; done
+
+AD1_ARK2402.sort
+38557
+60791
+AD1_CascotL7.sort
+27558
+56920
+AD1_Coker315.sort
+43802
+62484
+AD1_CRB252.sort
+44923
+62239
+AD1_FM958.sort
+38073
+64986
+AD1_LKT511.sort
+39643
+65343
+AD1_Maxxa.sort
+43859
+61093
+AD1_PM145.sort
+24158
+48562
+AD1_TAMCOT.sort
+33487
+65144
+AD1_TM1.sort
+43277
+61783
+AD1_TX0044.sort
+40237
+65936
+AD1_TX0480.sort
+20731
+41910
+AD1_TX0665.sort
+42453
+63718
+AD1_TX0672.sort
+41269
+61506
+AD1_TX0786.sort
+26973
+53469
+AD1_TX1009.sort
+43346
+63432
+AD1_TX1037.sort
+37995
+65885
+AD1_TX1046.sort
+47262
+60782
+AD1_TX1055.sort
+30527
+56716
+AD1_TX1107.sort
+30714
+56251
+AD1_TX1110.sort
+40820
+65871
+AD1_TX1120.sort
+42315
+63851
+AD1_TX1182.sort
+44297
+61960
+AD1_TX1226.sort
+24247
+47963
+AD1_TX1228.sort
+46196
+61449
+AD1_TX1236.sort
+26910
+54226
+AD1_TX1748.sort
+36533
+61944
+AD1_TX1982.sort
+45329
+60076
+AD1_TX1988.sort
+46492
+60777
+AD1_TX1996.sort
+39675
+59928
+AD1_TX2002.sort
+42700
+63476
+AD1_TX2089.sort
+37892
+62525
+AD1_TX2090.sort
+28890
+51445
+AD1_TX2091.sort
+24328
+48573
+AD1_TX2092.sort
+19018
+35478
+AD1_TX2094.sort
+48449
+60078
+AD1_TX2095.sort
+42913
+62828
+AD1_TX2273.sort
+26486
+55803
+
+############## more gene conversion crap ##############
+
+intersect(row.names(PiA),row.names(PiD))
+
+  [1] "Gorai.001G014000" "Gorai.001G015200" "Gorai.001G015300"
+  [4] "Gorai.001G020400" "Gorai.001G020500" "Gorai.001G020600"
+  [7] "Gorai.001G051500" "Gorai.001G053900" "Gorai.001G059900"
+ [10] "Gorai.001G075800" "Gorai.001G077600" "Gorai.001G087400"
+ [13] "Gorai.001G089400" "Gorai.001G090000" "Gorai.001G101300"
+ [16] "Gorai.001G126200" "Gorai.001G126800" "Gorai.001G134900"
+ [19] "Gorai.001G160100" "Gorai.001G160400" "Gorai.001G160700"
+ [22] "Gorai.001G160900" "Gorai.001G161000" "Gorai.001G161300"
+ [25] "Gorai.001G161400" "Gorai.001G161600" "Gorai.001G162000"
+ [28] "Gorai.001G162100" "Gorai.001G162300" "Gorai.001G163300"
+ [31] "Gorai.001G164100" "Gorai.001G164300" "Gorai.001G164700"
+ [34] "Gorai.001G165000" "Gorai.001G165400" "Gorai.001G165600"
+ [37] "Gorai.001G165700" "Gorai.001G165800" "Gorai.001G165900"
+ [40] "Gorai.001G166000" "Gorai.001G166100" "Gorai.001G166600"
+ [43] "Gorai.001G166700" "Gorai.001G167000" "Gorai.001G167900"
+ [46] "Gorai.001G168000" "Gorai.001G168100" "Gorai.001G172200"
+ [49] "Gorai.001G173700" "Gorai.001G173900" "Gorai.001G174000"
+ [52] "Gorai.001G205300" "Gorai.001G216500" "Gorai.001G234300"
+ [55] "Gorai.002G006500" "Gorai.002G027800" "Gorai.002G028100"
+ [58] "Gorai.002G028400" "Gorai.002G055100" "Gorai.002G065300"
+ [61] "Gorai.002G065400" "Gorai.002G065500" "Gorai.002G066600"
+ [64] "Gorai.002G077200" "Gorai.002G081300" "Gorai.002G126200"
+ [67] "Gorai.002G127000" "Gorai.002G142700" "Gorai.002G146600"
+ [70] "Gorai.002G152500" "Gorai.002G166800" "Gorai.002G177000"
+ [73] "Gorai.002G231200" "Gorai.002G236000" "Gorai.002G238200"
+ [76] "Gorai.002G251500" "Gorai.002G261600" "Gorai.002G268600"
+ [79] "Gorai.003G007000" "Gorai.003G011500" "Gorai.003G021100"
+ [82] "Gorai.003G025900" "Gorai.003G044400" "Gorai.003G051800"
+ [85] "Gorai.003G061700" "Gorai.003G098300" "Gorai.003G100900"
+ [88] "Gorai.003G101700" "Gorai.003G103000" "Gorai.003G105200"
+ [91] "Gorai.003G112000" "Gorai.003G118000" "Gorai.003G134300"
+ [94] "Gorai.003G139800" "Gorai.003G163300" "Gorai.003G175400"
+ [97] "Gorai.003G176300" "Gorai.004G002100" "Gorai.004G026700"
+[100] "Gorai.004G027600" "Gorai.004G044000" "Gorai.004G079500"
+[103] "Gorai.004G088000" "Gorai.004G095400" "Gorai.004G101100"
+[106] "Gorai.004G117700" "Gorai.004G118800" "Gorai.004G120400"
+[109] "Gorai.004G125200" "Gorai.004G130900" "Gorai.004G141400"
+[112] "Gorai.004G150600" "Gorai.004G150800" "Gorai.004G151000"
+[115] "Gorai.004G155700" "Gorai.004G169000" "Gorai.004G196800"
+[118] "Gorai.004G205900" "Gorai.004G212200" "Gorai.004G218500"
+[121] "Gorai.004G247700" "Gorai.004G250800" "Gorai.004G264200"
+[124] "Gorai.004G264600" "Gorai.004G280500" "Gorai.004G280800"
+[127] "Gorai.004G283700" "Gorai.005G015700" "Gorai.005G035100"
+[130] "Gorai.005G043000" "Gorai.005G049900" "Gorai.005G050000"
+[133] "Gorai.005G059800" "Gorai.005G077100" "Gorai.005G096500"
+[136] "Gorai.005G097500" "Gorai.005G100800" "Gorai.005G108900"
+[139] "Gorai.005G129400" "Gorai.005G137700" "Gorai.005G138200"
+[142] "Gorai.005G145700" "Gorai.005G147200" "Gorai.005G156200"
+[145] "Gorai.005G167800" "Gorai.005G172100" "Gorai.005G221300"
+[148] "Gorai.005G226800" "Gorai.005G237100" "Gorai.005G240900"
+[151] "Gorai.006G000200" "Gorai.006G014500" "Gorai.006G042800"
+[154] "Gorai.006G049700" "Gorai.006G055700" "Gorai.006G068200"
+[157] "Gorai.006G068500" "Gorai.006G075100" "Gorai.006G075900"
+[160] "Gorai.006G082500" "Gorai.006G096900" "Gorai.006G117100"
+[163] "Gorai.006G150600" "Gorai.006G155800" "Gorai.006G165800"
+[166] "Gorai.006G165900" "Gorai.006G180900" "Gorai.006G191200"
+[169] "Gorai.006G192300" "Gorai.006G197800" "Gorai.006G217000"
+[172] "Gorai.006G253700" "Gorai.006G263600" "Gorai.006G268400"
+[175] "Gorai.007G001800" "Gorai.007G010800" "Gorai.007G012000"
+[178] "Gorai.007G022600" "Gorai.007G023500" "Gorai.007G087000"
+[181] "Gorai.007G093700" "Gorai.007G093800" "Gorai.007G099300"
+[184] "Gorai.007G113900" "Gorai.007G130200" "Gorai.007G137400"
+[187] "Gorai.007G157200" "Gorai.007G166300" "Gorai.007G170000"
+[190] "Gorai.007G179300" "Gorai.007G191800" "Gorai.007G194700"
+[193] "Gorai.007G212900" "Gorai.007G214800" "Gorai.007G215200"
+[196] "Gorai.007G215900" "Gorai.007G229500" "Gorai.007G237300"
+[199] "Gorai.007G252000" "Gorai.007G252100" "Gorai.007G260000"
+[202] "Gorai.007G260100" "Gorai.007G260600" "Gorai.007G268800"
+[205] "Gorai.007G278800" "Gorai.007G287700" "Gorai.007G292800"
+[208] "Gorai.007G313400" "Gorai.007G317900" "Gorai.007G350500"
+[211] "Gorai.007G367900" "Gorai.007G370800" "Gorai.007G378300"
+[214] "Gorai.008G005900" "Gorai.008G009700" "Gorai.008G018000"
+[217] "Gorai.008G024000" "Gorai.008G048100" "Gorai.008G059900"
+[220] "Gorai.008G062900" "Gorai.008G064900" "Gorai.008G077300"
+[223] "Gorai.008G077800" "Gorai.008G092300" "Gorai.008G098200"
+[226] "Gorai.008G112400" "Gorai.008G115200" "Gorai.008G124500"
+[229] "Gorai.008G126700" "Gorai.008G131800" "Gorai.008G132000"
+[232] "Gorai.008G139100" "Gorai.008G143600" "Gorai.008G155400"
+[235] "Gorai.008G168500" "Gorai.008G198100" "Gorai.008G198200"
+[238] "Gorai.008G233400" "Gorai.008G239400" "Gorai.008G242100"
+[241] "Gorai.008G266800" "Gorai.008G278100" "Gorai.008G285900"
+[244] "Gorai.009G004400" "Gorai.009G004900" "Gorai.009G040800"
+[247] "Gorai.009G040900" "Gorai.009G045500" "Gorai.009G050700"
+[250] "Gorai.009G065600" "Gorai.009G068900" "Gorai.009G078400"
+[253] "Gorai.009G093700" "Gorai.009G100600" "Gorai.009G104200"
+[256] "Gorai.009G104300" "Gorai.009G146500" "Gorai.009G167800"
+[259] "Gorai.009G174500" "Gorai.009G174600" "Gorai.009G175500"
+[262] "Gorai.009G181300" "Gorai.009G185200" "Gorai.009G191000"
+[265] "Gorai.009G200600" "Gorai.009G213800" "Gorai.009G230400"
+[268] "Gorai.009G235000" "Gorai.009G236600" "Gorai.009G236700"
+[271] "Gorai.009G237900" "Gorai.009G243600" "Gorai.009G250900"
+[274] "Gorai.009G252000" "Gorai.009G258800" "Gorai.009G268600"
+[277] "Gorai.009G271100" "Gorai.009G276600" "Gorai.009G280900"
+[280] "Gorai.009G281100" "Gorai.009G302500" "Gorai.009G313100"
+[283] "Gorai.009G313200" "Gorai.009G313900" "Gorai.009G320900"
+[286] "Gorai.009G325200" "Gorai.009G327600" "Gorai.009G333000"
+[289] "Gorai.009G339300" "Gorai.009G350200" "Gorai.009G380800"
+[292] "Gorai.009G395200" "Gorai.009G401900" "Gorai.009G403800"
+[295] "Gorai.009G415900" "Gorai.009G439200" "Gorai.010G008900"
+[298] "Gorai.010G023800" "Gorai.010G031500" "Gorai.010G035000"
+[301] "Gorai.010G063400" "Gorai.010G081000" "Gorai.010G085400"
+[304] "Gorai.010G087200" "Gorai.010G096800" "Gorai.010G123400"
+[307] "Gorai.010G129700" "Gorai.010G149300" "Gorai.010G154700"
+[310] "Gorai.010G158500" "Gorai.010G183600" "Gorai.010G230100"
+[313] "Gorai.010G231800" "Gorai.010G242800" "Gorai.010G243100"
+[316] "Gorai.011G011200" "Gorai.011G014300" "Gorai.011G032300"
+[319] "Gorai.011G034100" "Gorai.011G040900" "Gorai.011G062800"
+[322] "Gorai.011G083000" "Gorai.011G085100" "Gorai.011G098400"
+[325] "Gorai.011G104800" "Gorai.011G106100" "Gorai.011G106200"
+[328] "Gorai.011G117800" "Gorai.011G118300" "Gorai.011G139200"
+[331] "Gorai.011G148900" "Gorai.011G155800" "Gorai.011G161200"
+[334] "Gorai.011G161300" "Gorai.011G176500" "Gorai.011G188900"
+[337] "Gorai.011G189300" "Gorai.011G190600" "Gorai.011G200200"
+[340] "Gorai.011G201900" "Gorai.011G203100" "Gorai.011G203400"
+[343] "Gorai.011G212700" "Gorai.011G212900" "Gorai.011G213900"
+[346] "Gorai.011G218400" "Gorai.011G241700" "Gorai.011G279800"
+[349] "Gorai.012G001200" "Gorai.012G009300" "Gorai.012G009400"
+[352] "Gorai.012G009500" "Gorai.012G011700" "Gorai.012G026100"
+[355] "Gorai.012G026200" "Gorai.012G058900" "Gorai.012G060700"
+[358] "Gorai.012G075600" "Gorai.012G082300" "Gorai.012G098100"
+[361] "Gorai.012G112000" "Gorai.012G149800" "Gorai.012G150900"
+[364] "Gorai.012G175500" "Gorai.012G176200" "Gorai.013G019500"
+[367] "Gorai.013G023400" "Gorai.013G039800" "Gorai.013G040000"
+[370] "Gorai.013G045300" "Gorai.013G048500" "Gorai.013G048600"
+[373] "Gorai.013G055700" "Gorai.013G079500" "Gorai.013G080300"
+[376] "Gorai.013G096100" "Gorai.013G108100" "Gorai.013G112000"
+[379] "Gorai.013G114800" "Gorai.013G114900" "Gorai.013G118300"
+[382] "Gorai.013G121000" "Gorai.013G141500" "Gorai.013G163900"
+[385] "Gorai.013G202800" "Gorai.013G203900" "Gorai.013G209500"
+[388] "Gorai.013G212500" "Gorai.013G224300" "Gorai.013G235100"
+[391] "Gorai.013G246800"
+
+## grepstuff.sh ##
+
+grep "Gorai.001G014000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G015200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G015300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G020400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G020500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G020600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G051500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G053900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G059900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G075800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G077600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G087400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G089400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G090000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G101300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G126200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G126800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G134900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G160100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G160400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G160700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G160900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G161000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G161300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G161400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G161600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G162000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G162100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G162300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G163300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G164100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G164300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G164700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G165000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G165400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G165600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G165700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G165800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G165900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G166000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G166100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G166600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G166700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G167000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G167900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G168000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G168100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G172200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G173700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G173900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G174000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G205300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G216500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.001G234300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G006500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G027800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G028100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G028400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G055100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G065300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G065400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G065500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G066600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G077200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G081300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G126200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G127000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G142700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G146600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G152500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G166800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G177000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G231200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G236000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G238200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G251500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G261600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.002G268600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G007000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G011500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G021100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G025900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G044400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G051800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G061700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G098300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G100900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G101700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G103000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G105200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G112000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G118000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G134300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G139800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G163300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G175400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.003G176300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G002100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G026700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G027600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G044000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G079500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G088000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G095400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G101100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G117700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G118800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G120400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G125200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G130900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G141400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G150600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G150800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G151000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G155700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G169000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G196800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G205900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G212200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G218500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G247700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G250800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G264200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G264600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G280500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G280800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.004G283700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G015700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G035100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G043000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G049900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G050000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G059800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G077100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G096500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G097500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G100800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G108900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G129400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G137700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G138200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G145700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G147200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G156200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G167800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G172100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G221300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G226800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G237100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.005G240900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G000200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G014500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G042800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G049700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G055700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G068200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G068500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G075100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G075900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G082500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G096900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G117100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G150600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G155800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G165800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G165900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G180900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G191200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G192300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G197800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G217000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G253700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G263600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.006G268400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G001800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G010800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G012000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G022600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G023500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G087000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G093700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G093800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G099300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G113900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G130200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G137400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G157200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G166300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G170000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G179300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G191800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G194700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G212900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G214800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G215200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G215900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G229500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G237300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G252000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G252100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G260000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G260100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G260600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G268800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G278800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G287700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G292800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G313400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G317900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G350500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G367900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G370800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.007G378300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G005900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G009700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G018000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G024000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G048100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G059900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G062900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G064900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G077300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G077800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G092300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G098200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G112400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G115200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G124500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G126700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G131800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G132000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G139100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G143600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G155400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G168500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G198100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G198200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G233400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G239400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G242100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G266800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G278100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.008G285900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G004400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G004900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G040800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G040900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G045500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G050700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G065600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G068900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G078400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G093700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G100600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G104200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G104300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G146500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G167800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G174500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G174600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G175500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G181300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G185200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G191000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G200600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G213800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G230400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G235000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G236600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G236700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G237900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G243600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G250900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G252000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G258800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G268600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G271100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G276600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G280900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G281100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G302500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G313100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G313200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G313900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G320900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G325200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G327600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G333000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G339300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G350200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G380800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G395200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G401900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G403800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G415900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.009G439200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G008900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G023800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G031500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G035000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G063400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G081000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G085400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G087200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G096800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G123400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G129700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G149300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G154700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G158500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G183600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G230100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G231800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G242800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.010G243100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G011200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G014300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G032300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G034100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G040900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G062800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G083000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G085100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G098400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G104800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G106100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G106200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G117800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G118300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G139200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G148900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G155800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G161200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G161300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G176500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G188900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G189300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G190600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G200200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G201900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G203100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G203400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G212700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G212900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G213900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G218400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G241700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.011G279800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.012G001200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.012G009300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.012G009400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.012G009500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.012G011700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.012G026100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.012G026200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.012G058900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.012G060700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.012G075600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.012G082300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.012G098100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.012G112000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.012G149800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.012G150900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.012G175500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.012G176200" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G019500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G023400" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G039800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G040000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G045300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G048500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G048600" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G055700" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G079500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G080300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G096100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G108100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G112000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G114800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G114900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G118300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G121000" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G141500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G163900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G202800" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G203900" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G209500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G212500" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G224300" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G235100" D5.CDS_range.gff >> D5.AD.gff
+grep "Gorai.013G246800" D5.CDS_range.gff >> D5.AD.gff
+
+## end grepstuff.sh ##
+
+awk '{ print $1 "\t" "snpindex" "\t" "snp" "\t" $2 "\t" $2 "\t" "." "\t" "+" "\t" "." "\t" "gene" }' D13.snp4.1 > D5.fake.gff
+
+intersectBed -a D5.AD.gff -b D5.fake.gff > D5.ADsnp.gff
+
+[corrinne@biocrunch snpconv]$ cut -f9 D5.ADsnp.gff | uniq | wc -l
+332
+[corrinne@biocrunch snpconv]$ cut -f9 D5.AD.gff | uniq | wc -l
+391
+
+## R part ##
+genes <- read.table("D5.ADsnp.gff", col.names=c("chr","who","feature","start","end","f","str","r","gene"))
+genlen <- read.table("D5.AD.gff", col.names=c("chr","who","feature","start","end","f","str","r","gene"), row.names=9)
+convcou <- read.table("AD1.conversion.counts", row.names=1, header=TRUE)
+colnames(convcou) <- gsub('.sort.bam', '', colnames(convcou))
+convcou <- convcou[,1:37]
+
+genecou <- read.table("AD1.gene.counts", row.names=1, header=TRUE)
+colnames(genecou) <- gsub('.sort.bam', '', colnames(genecou))
+genecou$AD1_TX2273 <- NULL
+
+convperc <- genecou[,1:2]
+convperc$AD1_ARK2402  <- convcou$AD1_ARK2402  / genecou$AD1_ARK2402 
+convperc$AD1_CascotL7  <- convcou$AD1_CascotL7  / genecou$AD1_CascotL7 
+convperc$AD1_Coker315  <- convcou$AD1_Coker315  / genecou$AD1_Coker315 
+convperc$AD1_CRB252   <- convcou$AD1_CRB252   / genecou$AD1_CRB252  
+convperc$AD1_FM958   <- convcou$AD1_FM958   / genecou$AD1_FM958  
+convperc$AD1_LKT511   <- convcou$AD1_LKT511   / genecou$AD1_LKT511  
+convperc$AD1_Maxxa   <- convcou$AD1_Maxxa   / genecou$AD1_Maxxa  
+convperc$AD1_PM145   <- convcou$AD1_PM145   / genecou$AD1_PM145  
+convperc$AD1_TAMCOT    <-  convcou$AD1_TAMCOT  / genecou$AD1_TAMCOT   
+convperc$AD1_TM1  <-  convcou$AD1_TM1  / genecou$AD1_TM1   
+convperc$AD1_TX0044  <-  convcou$AD1_TX0044  / genecou$AD1_TX0044   
+convperc$AD1_TX0480  <-  convcou$AD1_TX0480  / genecou$AD1_TX0480   
+convperc$AD1_TX0665  <-  convcou$AD1_TX0665  / genecou$AD1_TX0665   
+convperc$AD1_TX0672  <-  convcou$AD1_TX0672  / genecou$AD1_TX0672   
+convperc$AD1_TX0786  <-  convcou$AD1_TX0786  / genecou$AD1_TX0786   
+convperc$AD1_TX1009  <-  convcou$AD1_TX1009  / genecou$AD1_TX1009   
+convperc$AD1_TX1037  <-  convcou$AD1_TX1037  / genecou$AD1_TX1037   
+convperc$AD1_TX1046  <-  convcou$AD1_TX1046  / genecou$AD1_TX1046   
+convperc$AD1_TX1055  <-  convcou$AD1_TX1055  / genecou$AD1_TX1055   
+convperc$AD1_TX1107  <-  convcou$AD1_TX1107  / genecou$AD1_TX1107   
+convperc$AD1_TX1110  <-  convcou$AD1_TX1110  / genecou$AD1_TX1110   
+convperc$AD1_TX1120  <-  convcou$AD1_TX1120  / genecou$AD1_TX1120   
+convperc$AD1_TX1182  <-  convcou$AD1_TX1182  / genecou$AD1_TX1182   
+convperc$AD1_TX1226  <-  convcou$AD1_TX1226  / genecou$AD1_TX1226   
+convperc$AD1_TX1228  <-  convcou$AD1_TX1228  / genecou$AD1_TX1228   
+convperc$AD1_TX1236  <-  convcou$AD1_TX1236  / genecou$AD1_TX1236   
+convperc$AD1_TX1748  <-  convcou$AD1_TX1748  / genecou$AD1_TX1748   
+convperc$AD1_TX1982  <-  convcou$AD1_TX1982  / genecou$AD1_TX1982   
+convperc$AD1_TX1988  <-  convcou$AD1_TX1988  / genecou$AD1_TX1988   
+convperc$AD1_TX1996  <-  convcou$AD1_TX1996  / genecou$AD1_TX1996   
+convperc$AD1_TX2002  <-  convcou$AD1_TX2002  / genecou$AD1_TX2002   
+convperc$AD1_TX2089  <-  convcou$AD1_TX2089  / genecou$AD1_TX2089   
+convperc$AD1_TX2090  <-  convcou$AD1_TX2090  / genecou$AD1_TX2090   
+convperc$AD1_TX2091  <-  convcou$AD1_TX2091  / genecou$AD1_TX2091   
+convperc$AD1_TX2092  <-  convcou$AD1_TX2092  / genecou$AD1_TX2092   
+convperc$AD1_TX2094  <-  convcou$AD1_TX2094  / genecou$AD1_TX2094   
+convperc$AD1_TX2095  <-  convcou$AD1_TX2095  / genecou$AD1_TX2095   
+
+
+
+occurs <- aggregate(start ~ gene, data = genes, function(x) length(unique(x)))
+row.names(occurs) <- occurs$gene
+occurs$gene <- NULL
+names(occurs)[1] <- "SNPcount"
+
+snplen <- merge(genlen, occurs, by="row.names")
+row.names(snplen) <- snplen$Row.names
+snplen$Row.names <- NULL
+snplen$who <- NULL
+snplen$feature <- NULL
+snplen$f <- NULL
+snplen$r <- NULL
+snplen$str <- NULL
+
+snplen$SNPdist <- snplen$len/snplen$SNPcount
+
+> mean(snplen$SNPdist)
+[1] 80.26065
+> sd(snplen$SNPdist)
+[1] 172.5692
+> min(snplen$SNPdist)
+[1] 10.64516
+> max(snplen$SNPdist)
+[1] 1975.5
+> median(snplen$SNPdist)
+[1] 42.6795
+> sum(snplen$SNPdist<250)
+[1] 314
+> sum(snplen$SNPdist>250)
+[1] 18
+> sum(snplen$SNPdist<150)
+[1] 307
+> sum(snplen$SNPdist>150)
+[1] 25
+> sum(snplen$SNPdist<149)
+[1] 307
+> sum(snplen$SNPdist<125)
+[1] 304
+
+snplen <- snplen[snplen$SNPdist<125, c(1,4,6) ]
+snplen$int <- snplen$len - 125 +1
+snplen$SNPint <- 125 - snplen$SNPdist
+snplen$frac <- snplen$SNPint/snplen$int
+
+
+convperc <- merge(snplen, convperc, by="row.names")
+row.names(convperc) <- convperc$Row.names
+convperc$Row.names <- NULL
+
+
+convperc$AD1_ARK2402    <- ifelse(convperc$AD1_ARK2402<convperc$frac, 0, ifelse(convperc$AD1_ARK2402>=convperc$frac,convperc$AD1_ARK2402,NA))
+convperc$AD1_CascotL7   <- ifelse(convperc$AD1_CascotL7<convperc$frac, 0, ifelse(convperc$AD1_CascotL7>=convperc$frac,convperc$AD1_CascotL7,NA))
+convperc$AD1_Coker315   <- ifelse(convperc$AD1_Coker315<convperc$frac, 0, ifelse(convperc$AD1_Coker315>=convperc$frac,convperc$AD1_Coker315,NA))
+convperc$AD1_CRB252     <- ifelse(convperc$AD1_CRB252<convperc$frac, 0, ifelse(convperc$AD1_CRB252>=convperc$frac,convperc$AD1_CRB252,NA))
+convperc$AD1_FM958      <- ifelse(convperc$AD1_FM958<convperc$frac, 0, ifelse(convperc$AD1_FM958>=convperc$frac,convperc$AD1_FM958,NA))
+convperc$AD1_LKT511     <- ifelse(convperc$AD1_LKT511<convperc$frac, 0, ifelse(convperc$AD1_LKT511>=convperc$frac,convperc$AD1_LKT511,NA))
+convperc$AD1_Maxxa      <- ifelse(convperc$AD1_Maxxa<convperc$frac, 0, ifelse(convperc$AD1_Maxxa>=convperc$frac,convperc$AD1_Maxxa,NA))
+convperc$AD1_PM145      <- ifelse(convperc$AD1_PM145<convperc$frac, 0, ifelse(convperc$AD1_PM145>=convperc$frac,convperc$AD1_PM145,NA))
+convperc$AD1_TAMCOT     <- ifelse(convperc$AD1_TAMCOT<convperc$frac, 0, ifelse(convperc$AD1_TAMCOT>=convperc$frac,convperc$AD1_TAMCOT,NA))
+convperc$AD1_TM1        <- ifelse(convperc$AD1_TM1<convperc$frac, 0, ifelse(convperc$AD1_TM1>=convperc$frac,convperc$AD1_TM1,NA))
+convperc$AD1_TX0044     <- ifelse(convperc$AD1_TX0044<convperc$frac, 0, ifelse(convperc$AD1_TX0044>=convperc$frac,convperc$AD1_TX0044,NA))
+convperc$AD1_TX0480     <- ifelse(convperc$AD1_TX0480<convperc$frac, 0, ifelse(convperc$AD1_TX0480>=convperc$frac,convperc$AD1_TX0480,NA))
+convperc$AD1_TX0665     <- ifelse(convperc$AD1_TX0665<convperc$frac, 0, ifelse(convperc$AD1_TX0665>=convperc$frac,convperc$AD1_TX0665,NA))
+convperc$AD1_TX0672     <- ifelse(convperc$AD1_TX0672<convperc$frac, 0, ifelse(convperc$AD1_TX0672>=convperc$frac,convperc$AD1_TX0672,NA))
+convperc$AD1_TX0786     <- ifelse(convperc$AD1_TX0786<convperc$frac, 0, ifelse(convperc$AD1_TX0786>=convperc$frac,convperc$AD1_TX0786,NA))
+convperc$AD1_TX1009     <- ifelse(convperc$AD1_TX1009<convperc$frac, 0, ifelse(convperc$AD1_TX1009>=convperc$frac,convperc$AD1_TX1009,NA))
+convperc$AD1_TX1037     <- ifelse(convperc$AD1_TX1037<convperc$frac, 0, ifelse(convperc$AD1_TX1037>=convperc$frac,convperc$AD1_TX1037,NA))
+convperc$AD1_TX1046     <- ifelse(convperc$AD1_TX1046<convperc$frac, 0, ifelse(convperc$AD1_TX1046>=convperc$frac,convperc$AD1_TX1046,NA))
+convperc$AD1_TX1055     <- ifelse(convperc$AD1_TX1055<convperc$frac, 0, ifelse(convperc$AD1_TX1055>=convperc$frac,convperc$AD1_TX1055,NA))
+convperc$AD1_TX1107     <- ifelse(convperc$AD1_TX1107<convperc$frac, 0, ifelse(convperc$AD1_TX1107>=convperc$frac,convperc$AD1_TX1107,NA))
+convperc$AD1_TX1110     <- ifelse(convperc$AD1_TX1110<convperc$frac, 0, ifelse(convperc$AD1_TX1110>=convperc$frac,convperc$AD1_TX1110,NA))
+convperc$AD1_TX1120     <- ifelse(convperc$AD1_TX1120<convperc$frac, 0, ifelse(convperc$AD1_TX1120>=convperc$frac,convperc$AD1_TX1120,NA))
+convperc$AD1_TX1182     <- ifelse(convperc$AD1_TX1182<convperc$frac, 0, ifelse(convperc$AD1_TX1182>=convperc$frac,convperc$AD1_TX1182,NA))
+convperc$AD1_TX1226     <- ifelse(convperc$AD1_TX1226<convperc$frac, 0, ifelse(convperc$AD1_TX1226>=convperc$frac,convperc$AD1_TX1226,NA))
+convperc$AD1_TX1228     <- ifelse(convperc$AD1_TX1228<convperc$frac, 0, ifelse(convperc$AD1_TX1228>=convperc$frac,convperc$AD1_TX1228,NA))
+convperc$AD1_TX1236     <- ifelse(convperc$AD1_TX1236<convperc$frac, 0, ifelse(convperc$AD1_TX1236>=convperc$frac,convperc$AD1_TX1236,NA))
+convperc$AD1_TX1748     <- ifelse(convperc$AD1_TX1748<convperc$frac, 0, ifelse(convperc$AD1_TX1748>=convperc$frac,convperc$AD1_TX1748,NA))
+convperc$AD1_TX1982     <- ifelse(convperc$AD1_TX1982<convperc$frac, 0, ifelse(convperc$AD1_TX1982>=convperc$frac,convperc$AD1_TX1982,NA))
+convperc$AD1_TX1988     <- ifelse(convperc$AD1_TX1988<convperc$frac, 0, ifelse(convperc$AD1_TX1988>=convperc$frac,convperc$AD1_TX1988,NA))
+convperc$AD1_TX1996     <- ifelse(convperc$AD1_TX1996<convperc$frac, 0, ifelse(convperc$AD1_TX1996>=convperc$frac,convperc$AD1_TX1996,NA))
+convperc$AD1_TX2002     <- ifelse(convperc$AD1_TX2002<convperc$frac, 0, ifelse(convperc$AD1_TX2002>=convperc$frac,convperc$AD1_TX2002,NA))
+convperc$AD1_TX2089     <- ifelse(convperc$AD1_TX2089<convperc$frac, 0, ifelse(convperc$AD1_TX2089>=convperc$frac,convperc$AD1_TX2089,NA))
+convperc$AD1_TX2090     <- ifelse(convperc$AD1_TX2090<convperc$frac, 0, ifelse(convperc$AD1_TX2090>=convperc$frac,convperc$AD1_TX2090,NA))
+convperc$AD1_TX2091     <- ifelse(convperc$AD1_TX2091<convperc$frac, 0, ifelse(convperc$AD1_TX2091>=convperc$frac,convperc$AD1_TX2091,NA))
+convperc$AD1_TX2092     <- ifelse(convperc$AD1_TX2092<convperc$frac, 0, ifelse(convperc$AD1_TX2092>=convperc$frac,convperc$AD1_TX2092,NA))
+convperc$AD1_TX2094     <- ifelse(convperc$AD1_TX2094<convperc$frac, 0, ifelse(convperc$AD1_TX2094>=convperc$frac,convperc$AD1_TX2094,NA))
+convperc$AD1_TX2095     <- ifelse(convperc$AD1_TX2095<convperc$frac, 0, ifelse(convperc$AD1_TX2095>=convperc$frac,convperc$AD1_TX2095,NA))
+
+convperc$sum <- rowSums(convperc[7:43])
+
+> length(which(convperc$sum==0))
+[1] 142
+
+
+#########################
+
+new snp and gene conversion methods
+
+#samtools mpileup -uf ref.fa aln1.bam aln2.bam | bcftools view -bvcg - > var.raw.bcf  
+#bcftools view var.raw.bcf | vcfutils.pl varFilter -D100 > var.flt.vcf 
+
+#samtools mpileup -uf Dgenome2_13.fasta *.sort.bam | bcftools call -o AD1.bcf -mv -O b
+
+interSnp -r Dgenome2_13.fasta -g D5.CDS_range.gff -v AD1.vcf *.bam
+
+# remove multi-allelic, and those with too few samples
+egrep 'CHROM|NS=24|NS=25|NS=26|NS=27|NS=28|NS=29|NS=30|NS=31|NS=32|NS=33|NS=34|NS=35|NS=36|NS=37|NS=38|NS=39|NS=40' AD1.vcf | sed '/A,C,G,T/d' |  sed '/A,C,G/d' |  sed '/A,C,T/d' |  sed '/A,G,T/d' |  sed '/C,G,T/d' | sed '/\tN\t/d' |  sed '/A\t[CG],[GT]\t/d' |  sed '/C\t[GA],[GT]\t/d' |  sed '/G\t[AC],[CT]\t/d' |  sed '/T\t[CA],[CG]\t/d' | awk '{print $1 "_" $2 "\t" $1 "\t" $2 "\t" $4 "\t" $5 "\t" $7 "\t" $8 "\t" $9 "\t" $10 "\t" $11 "\t" $12 "\t" $13 "\t" $14 "\t" $15 "\t" $16 "\t" $17 "\t" $18 "\t" $19 "\t" $20 "\t" $21 "\t" $22 "\t" $23 "\t" $24 "\t" $25 "\t" $26 "\t" $27 "\t" $28 "\t" $29 "\t" $30 "\t" $31 "\t" $32 "\t" $33 "\t" $34 "\t" $35 "\t" $36 "\t" $37 "\t" $38 "\t" $39 "\t" $40 "\t" $41 "\t" $42 "\t" $43 "\t" $44 "\t" $45 "\t" $46 "\t" $47 "\t" $48}' > AD1.nomulti.vcf
+
+# first two samples are diploid A; they should have only alt alleles and at least one should have alt allele info
+awk '$9 ~ /[1]\/[1]/' AD1.nomulti.vcf | awk '$10 ~ /[.]\/[.]/' | awk '$9!=$10{print}' > AD1.monoA1.vcf
+awk '$10 ~ /[1]\/[1]/' AD1.nomulti.vcf | awk '$9 ~ /[.]\/[.]/' | awk '$9!=$10{print}' > AD1.monoA2.vcf
+awk '$10 ~ /[1]\/[1]/' AD1.nomulti.vcf | awk '$9 ~ /[1]\/[1]/' | awk '$9!=$10{print}' > AD1.monoAb.vcf
+cat AD1.monoA1.vcf AD1.monoA2.vcf AD1.monoAb.vcf | sort -k2,2 -k 3,3n > AD1.conv.vcf
+
+# only recover genes that are on our list, so make the list
+
+intersectBed -a D5.CDS_range.gff -b D5.fake.gff > D5.snp.gff
+nano snpgenes.sh
+sed -i.bak 's/CDS_range/snp/g' snpgenes.sh
+cut -f1,4,9 D5.AD.gff | sed 's/\t/_/' > snp.genes
+cut -f1,4 D5.AD.gff | paste snp.genes - | column -s $'\t' -t > snp.location.table
+
+cut -f1 -d ' ' snp.location.table | while read line; do grep $line AD1.conv.vcf >> AD1.convgene.vcf; done
+
+
+sed 's/ /\t/g' snp.location.table | sed 's/\t\t/\t/g' | cut -f1 | sort | uniq -d | while read line; do grep $line snp.location.table; done
+
+
+
+
+grephomoeosnpsfromvcf.sh
+
+for a in 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47; do echo "sample column $a" >> report.out; echo "both A/D" >> report.out; cut -f$a AD1.homoeoSNPs.vcf | egrep '0/1|1/0' | wc -l >> report.out; echo "A only" >> report.out; cut -f$a AD1.homoeoSNPs.vcf | grep "1/1" | wc -l >> report.out; echo "D only" >> report.out; cut -f$a AD1.homoeoSNPs.vcf | grep "0/0" | wc -l >> report.out;done
+
+
+## R ## 
+
+genvcf <- merge(snpgen, vcf, by="row.names")
+row.names(genvcf) <- genvcf$Row.names
+genvcf$Row.names <- NULL
+genvcf$V3 <- NULL
+genvcf$V4 <- NULL
+genvcf$A1_Wagad <- NULL
+genvcf$A2_101 <- NULL
+
+
+# for some dumb reason, you can't use $ in a for loop with the variable, you use [[]]
+for(i in names(genvcf)){ genvcf[[i]] <- gsub(":[0-9]+", "", genvcf[[i]]) }
+for(i in names(genvcf)){ genvcf[[i]] <- gsub("./.", "NA", genvcf[[i]]), fixed=TRUE }
+
+> sum(genvcf == "0/0")
+[1] 95702
+> sum(genvcf == "0/1")
+[1] 471335
+> sum(genvcf == "1/1")
+[1] 12662
+
+
+
+> names(genvcf)
+ [1] "V2"           "CHROM"        "POS"          "REF"          "ALT"
+ [6] "FILTER"       "INFO"         "FORMAT"       "AD1_ARK2402"  "AD1_CascotL7"
+[11] "AD1_Coker315" "AD1_CRB252"   "AD1_FM958"    "AD1_LKT511"   "AD1_Maxxa"
+[16] "AD1_PM145"    "AD1_TAMCOT"   "AD1_TM1"      "AD1_TX0044"   "AD1_TX0480"
+[21] "AD1_TX0665"   "AD1_TX0672"   "AD1_TX0786"   "AD1_TX1009"   "AD1_TX1037"
+[26] "AD1_TX1046"   "AD1_TX1055"   "AD1_TX1107"   "AD1_TX1110"   "AD1_TX1120"
+[31] "AD1_TX1182"   "AD1_TX1226"   "AD1_TX1228"   "AD1_TX1236"   "AD1_TX1748"
+[36] "AD1_TX1982"   "AD1_TX1988"   "AD1_TX1996"   "AD1_TX2002"   "AD1_TX2089"
+[41] "AD1_TX2090"   "AD1_TX2091"   "AD1_TX2092"   "AD1_TX2094"   "AD1_TX2095"
+
+CHROMtab <- table(genvcf$CHROM,genvcf$AD1_TX2095, exclude="NA")
+for(i in names(genvcf[,9:44])){ table(genvcf$CHROM,genvcf[[i]], exclude="NA") + CHROMtab }
+
+          0/0   0/1   1/1
+  Chr01  3271  8475   161
+  Chr02  1197  5792    53
+  Chr03  1135  6862   151
+  Chr04  2746 11500    55
+  Chr05   553  5942    64
+  Chr06   775  6418    10
+  Chr07   857 11242   480
+  Chr08   941  8523   602
+  Chr09   505 10767   103
+  Chr10  1387  3057    22
+  Chr11   742  8581    50
+  Chr12  1385  1815     6
+  Chr13  1289  5750    80
+
+
+convtab <- as.data.frame.matrix(table(genvcf$V2,genvcf$AD1_TX2095, exclude=c("0/1","NA")))
+names(convtab)[names(convtab)=="0/0"] <- "AD1_TX2095.DC"
+names(convtab)[names(convtab)=="1/1"] <- "AD1_TX2095.AC"
+convtab$AD1_TX2095<- rowSums(convtab)
+
+for(i in names(genvcf[,9:44])){ 
+
+convtemp <- as.data.frame.matrix(table(genvcf$V2,genvcf[[i]], exclude=c("0/1","NA")))
+names(convtemp)[names(convtemp)=="0/0"] <- paste(i, ".DC", sep = "")
+names(convtemp)[names(convtemp)=="1/1"] <- paste(i, ".AC", sep = "")
+convtemp[[i]]<- rowSums(convtemp)
+
+convtab <- merge(convtab, convtemp, by="row.names", all=TRUE)
+row.names(convtab) <- convtab$Row.names
+convtab$Row.names <- NULL
+
+} 
+
+> table(rowSums(convtab))
+
+    0     2     4     6     8    10    12    14    16    18    20    22    24
+   11     5     3     5     7     3     4     5     1     8     3     4     5
+   26    28    30    32    34    36    40    42    44    46    50    58    62
+    1     1     2     1     1     1     1     1     3     3     2     2     1
+   64    68    70    72    76    80    84    86    88    90    92    96    98
+    2     2     2     1     2     2     2     2     2     3     1     1     3
+  100   102   104   108   110   112   116   120   124   128   134   136   142
+    2     1     2     1     3     1     1     1     3     2     1     2     2
+  144   146   148   150   154   156   160   170   172   174   182   196   198
+    1     2     1     2     1     3     1     1     2     1     1     1     1
+  204   206   208   210   218   220   224   230   232   240   244   252   254
+    2     1     1     1     2     1     2     1     1     1     1     2     1
+  258   260   264   270   276   280   282   290   292   296   300   306   316
+    1     1     1     1     1     1     1     1     1     2     1     1     1
+  322   324   334   338   344   352   360   366   376   388   394   400   402
+    1     1     2     1     1     1     1     1     2     1     2     1     1
+  430   434   438   460   464   470   474   482   490   504   524   532   554
+    1     1     1     1     1     1     1     1     1     1     1     1     1
+  562   574   604   626   644   648   650   664   690   708   730   734   740
+    1     1     1     1     1     1     1     1     1     1     1     1     1
+  742   758   760   764   768   774   776   782   798   812   818   820   832
+    1     1     1     1     1     1     1     1     1     1     1     1     1
+  838   864   870   874   926   928   934   940   962   964  1014  1038  1054
+    1     1     1     1     1     1     1     1     1     1     1     1     1
+ 1064  1164  1182  1186  1194  1200  1272  1284  1286  1302  1304  1414  1480
+    1     1     2     1     1     1     1     1     1     1     1     1     1
+ 1520  1566  1570  1578  1590  1654  1756  1878  1886  1890  1970  1978  2146
+    1     1     1     1     1     1     1     1     1     1     1     1     1
+ 2184  2266  2368  2456  2586  2674  2706  2934  2946  3096  3512  3548  4176
+    1     1     1     1     1     1     1     1     1     1     1     1     1
+ 4722  4874  5044  5052  5098  5352  5898  6072  7658 10020 14116
+    1     2     1     1     1     1     1     1     1     1     1
+
+   
+> nrow(convtab)
+[1] 300
+
+> (300-11)/300
+[1] 0.9633333  ## this is the percent of genes that have at least one SNP that could be converted in at least one accession
+
+convtab$accConv <- apply(convtab[, seq(3, ncol(convtab), by = 3)],1,function(x)sum(x != 0)) 
+
+> table(convtab$accConv)
+
+  0   1   2   3   4   5   6   7   8   9  10  12  13  14  15  16  17  18  19  20  # number of samples converted
+ 11  10   8   9   4   9  11   9   7   2   3   3   1   2   4   6   3   4   7   5  # number of genes
+
+ 21  22  23  24  25  26  27  28  29  30  31  32  33  34  35  36  37              # 37 is the max total accessions here
+  2   1   6   6   3   5   2   5   3   4   4   7   1   6  13  11 103
+
+> apply(convtab[, seq(3, ncol(convtab), by = 3)],2,function(x)sum(x != 0))
+  AD1_TX2095  AD1_ARK2402 AD1_CascotL7 AD1_Coker315   AD1_CRB252    AD1_FM958
+         166          236          212          153          174          165
+  AD1_LKT511    AD1_Maxxa    AD1_PM145   AD1_TAMCOT      AD1_TM1   AD1_TX0044
+         168          178          221          197          176          171
+  AD1_TX0480   AD1_TX0665   AD1_TX0672   AD1_TX0786   AD1_TX1009   AD1_TX1037
+         236          166          188          249          161          188
+  AD1_TX1046   AD1_TX1055   AD1_TX1107   AD1_TX1110   AD1_TX1120   AD1_TX1182
+         166          196          214          187          178          199
+  AD1_TX1226   AD1_TX1228   AD1_TX1236   AD1_TX1748   AD1_TX1982   AD1_TX1988
+         229          171          208          190          186          182
+  AD1_TX1996   AD1_TX2002   AD1_TX2089   AD1_TX2090   AD1_TX2091   AD1_TX2092
+         175          173          186          260          219          236
+  AD1_TX2094
+         175
+> mean(apply(convtab[, seq(3, ncol(convtab), by = 3)],2,function(x)sum(x != 0)))
+[1] 192.8378
+> mean(apply(convtab[, seq(3, ncol(convtab), by = 3)],2,function(x)sum(x != 0)))/300
+[1] 0.6427928
+
+
+
+
+####### SNPdat stuff #########
+
+awk '{print $2 "\t" $3 "\t" "SNPid" NR-1 "\t" $4 "\t" $5 }' AD1.convgene.uniq.vcf | sed 's/.,//g' > AD1.snpdat.vcf
+
+curl -O ftp://ftp.bioinfo.wsu.edu/species/Gossypium_raimondii/JGI_221_G.raimondii_Dgenome/genes/G.raimondii_JGI_221_v2.1.transcripts_exons.gff3.gz
+	gunzip G.raimondii_JGI_221_v2.1.transcripts_exons.gff3.gz
+
+error, try SNPeff
+
+###### SNPEff stuff ########
+
+[corrinne@biocrunch snpEff]$ java -Xmx4g -jar snpEff.jar databases | grep -i raimondii
+graimondii_221                                                  Cotton                                                                                                          http://downloads.sourceforge.net/project/snpeff/databases/v4_2/snpEff_v4_2_graimondii_221.zip
+
+
+java -Xmx16g path/to/snpEff/snpEff.jar -c path/to/snpEff/snpEff.config GRCh37.75 path/to/snps.vcf
+
+java -Xmx16g -jar snpEff.jar graimondii_221 AD1.snpeff.gff -classic -csvStats test2.csv -s test2.html > test2.gra.ann.vcf
