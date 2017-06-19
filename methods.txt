@@ -2,13 +2,6 @@ Basic stats for the sequencing:
 
 for a in A[12D][_13]*.bam; do echo $a >> reads.mapped.AD1; samtools flagstat $a | grep "mapped (" >> reads.mapped.AD1; done
 
-
-
-
-
-
-
-
 Methods for SeqCapDiversity
 
 ## map and split via polyCat (BamBam v 1.3)
@@ -301,21 +294,12 @@ PopD@region.data@populations2
 PopD@region.data@synonymous
 PopD.split <- splitting.data(PopD, subsites="coding", whole.data=FALSE)
 
-
-
-
-
-
-
-
 # calculate neutrality statistics
 PopA <- neutrality.stats(PopA)  
 get.neutrality(PopA)[[1]]  ### AD1 all
 get.neutrality(PopA)[[2]]  ### AD1 wild
 get.neutrality(PopA)[[3]]  ### AD1 domesticate 
 get.neutrality(PopA)[[4]]  ### AD3
-
-
 
 PopD <- neutrality.stats(PopD)  
 get.neutrality(PopD)[[1]]  ### AD1 all; theta=TRUE if you want to see the thetas
@@ -344,8 +328,6 @@ get.diversity(PopD)[[1]]  ### AD1
 get.diversity(PopD)[[1]]  ### AD6
 get.diversity(PopD)[[1]]  ### AD7
 get.diversity(PopD)[[1]]  ### AD3
-
-
 
 
 ##### True pi values, i.e., @Pi / @n.sites #####
@@ -571,7 +553,6 @@ txtStop()
 
 
 
-
 ##### now do the same kind of thing for Tajima's D #####
 PopTDA <- PopA@Tajima.D
 TajA <- as.data.frame(PopTDA)
@@ -644,139 +625,6 @@ TADplot <- grid.arrange(TAplot, TDplot)
 ggsave("TajAD.png", plot= TADplot)
 
 ######################### 
-
-
-
-
-##### aaaaaaaand now for Fay and Wu's H #####
-
-
-FayWuHA <- PopA@Fay.Wu.H
-FayA <- as.data.frame(FayWuHA)
-names(FayA)[1] <- "FayA.AD1"
-names(FayA)[2] <- "FayA.AD1w"
-names(FayA)[3] <- "FayA.AD1d"
-FayA[4] <- NULL
-row.names(FayA) <- gsub('.fasta', '', row.names(FayA))
-row.names(FayA) <- gsub('.clean.A', '', row.names(FayA))
-
-FayA$FayA.domRank <- NA
-FayA$FayA.domRank <- rank(FayA$FayA.AD1d)
-
-# should we include the difference in FWH AD1 - AD1d?
-
-save(FayA,file="FayA.Rdata")
-
-
-
-
-FayWuHD <- PopD@Fay.Wu.H
-FayD <- as.data.frame(FayWuHD)
-names(FayD)[1] <- "FayD.AD1"
-names(FayD)[2] <- "FayD.AD1w"
-names(FayD)[3] <- "FayD.AD1d"
-FayD[4] <- NULL
-row.names(FayD) <- gsub('.fasta', '', row.names(FayD))
-row.names(FayD) <- gsub('.clean.D', '', row.names(FayD))
-
-FayD$FayD.domRank <- NA
-FayD$FayD.domRank <- rank(FayD$FayD.AD1d)
-
-save(FayD,file="FayD.Rdata")
-
-
-bothFay <- merge(FayA, FayD, by="row.names", all=TRUE)
-row.names(bothFay) <- bothFay$Row.names
-bothFay$Row.names <- NULL
-
-PiTajFay <- merge(PiTaj, bothFay, by="row.names", all=TRUE)
-row.names(PiTajFay) <- PiTajFay$Row.names
-PiTajFay$Row.names <- NULL
-
-
-
-# FayA <- FayA[is.finite(FayA$AD1),]
-# FayA <- FayA[is.finite(FayA$AD1d),]
-# 
-# FayA10 <- head(FayA, 50)
-# 
-# FayA10v <- as.vector(FayA10['AD1d'])
-# names(FayA10v)[1] <- "AD1AFay"
-
-
-#########################  on PC?
-FayA$gene <- row.names(FayA)
-FayA$gene <- factor(FayA$gene, levels = FayA$gene[order(FayA$FayA.AD1)])
-
-
-FAplot <- ggplot(FayA, aes(x=gene, y=FayA.AD1)) + geom_point(stat="identity") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + geom_point(aes(x=FayA$gene, y = FayA$FayA.AD1w), color="green") + geom_point(aes(x=FayA$gene, y = FayA$FayA.AD1d), color="blue") + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
-ggsave("FayA.png", plot = FAplot)
-
-FayD$gene <- row.names(FayD)
-FayD$gene <- factor(FayD$gene, levels = FayD$gene[order(FayD$FayD.AD1)])
-
-FDplot <- ggplot(FayD, aes(x=gene, y=FayD.AD1)) + geom_point(stat="identity") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + geom_point(aes(x=FayD$gene, y = FayD$FayD.AD1w), color="green") + geom_point(aes(x=FayD$gene, y = FayD$FayD.AD1d), color="blue") + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
-ggsave("FayD.png", plot = FDplot)
-
-FADplot <- grid.arrange(FAplot, FDplot)
-ggsave("FayAD.png", plot= FADplot)
-
-######################### 
-
-
-
-##### but wait, what about FST between wild and domesticated accessions??? #####
-PopA <- F_ST.stats(PopA)
-FSTA <- as.data.frame(t(PopA@nuc.F_ST.pairwise))
-FSTA <- FSTA[-c(1:3,5:6)]
-names(FSTA)[1] <- "FSTA_wildVdom"
-row.names(FSTA) <- gsub('.fasta', '', row.names(FSTA))
-row.names(FSTA) <- gsub('.clean.A', '', row.names(FSTA))
-
-FSTA$FSTA.Rank <- NA
-FSTA$FSTA.Rank <- rank(-FSTA$FSTA_wildVdom)
-
-save(FSTA,file="FSTA.Rdata")
-
-
-PopD <- F_ST.stats(PopD)
-FSTD <- as.data.frame(t(PopD@nuc.F_ST.pairwise))
-FSTD <- FSTD[-c(1:3,5:6)]
-names(FSTD)[1] <- "FSTD_wildVdom"
-row.names(FSTD) <- gsub('.fasta', '', row.names(FSTD))
-row.names(FSTD) <- gsub('.clean.D', '', row.names(FSTD))
-
-FSTD$FSTD.Rank <- NA
-FSTD$FSTD.Rank <- rank(-FSTD$FSTD_wildVdom)
-
-save(FSTD,file="FSTD.Rdata")
-
-
-bothFST <- merge(FSTA, FSTD, by="row.names", all=TRUE)
-row.names(bothFST) <- bothFST$Row.names
-bothFST$Row.names <- NULL
-
-PiTajFayFST <- merge(PiTajFay, bothFST, by="row.names", all=TRUE)
-row.names(PiTajFayFST) <- PiTajFayFST$Row.names
-PiTajFayFST$Row.names <- NULL
-
-write.table(PiTajFayFST, file="PiTajFayFST.table", quote = FALSE, sep ="\t")
-
-
-
-
-#########################  for FST ggplot
-FST <- bothFST
-FST$gene <- row.names(bothFST)
-FST$gene <- factor(FST$gene, levels = FST$gene[order(FST$FSTA_wildVdom)])
-
-
-FSTplot <- ggplot(FST, aes(x=gene, y=FSTA_wildVdom)) + geom_point(stat="identity", color="green") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + geom_point(aes(x=FST$gene, y = FST$FSTD_wildVdom), color="blue") + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
-ggsave("FST.png", plot = FSTplot)
-
-
-######################### 
-
 
 
 
@@ -897,55 +745,6 @@ MStable$Flowering.Time.Network..Grover.2015 <- NULL
 write.table(MStable, file="MStable.table", quote = FALSE, sep ="\t")
 
 
-
-
-# TajA <- TajA[with(TajA, order(-wildVdom)),]
-# TajA <- TajA[is.finite(TajA$AD1d),]
-# TajA10 <- head(TajA, 50)
-# 
-# 
-# TajA10v <- as.vector(TajA10['wildVdom'])
-# names(TajA10v)[1] <- "AD1ATaj"
-# 
-# PiTajA <- merge(PiA10v, TajA10v, by="row.names", all=TRUE)
-# PiTajA <- PiTajA[is.finite(PiTajA$AD1dATaj),]
-# 
-# write.table(TajA10, file="TajA_10perc.table", quote = FALSE, sep ="\t")
-
-
-
-
-
-
-# McDonald-Kreitman test
-https://cran.r-project.org/web/packages/PopGenome/vignettes/Whole_genome_analyses_using_VCF_files.pdf
-
-
-# GENOME.class <- readData("\home\Alignments")
-# GENOME.class <- set.populations(GENOME.class,list(1:3,4:8,9:12))
-# GENOME.class <- set.outgroup(GENOME.class,13)
-# GENOME.class <- introgression.stats(GENOME.class)
-# show the result:
-# GENOME.class@D
-
-
-
-
-# get.biallelic.matrix(PopTest,1)
-# PopTest@region.data@CodingSNPS
-
-# values <- GENOME.class.slide@nuc.divesity.within
-# PopGplot(values)
-
-# PopTest.exons <- splitting.data(PopTest, subsites="coding")
-# PopTest.exons <- neutrality.stats(PopTest.exons)
-
-# GENOME.class <- readData("\home\Alignments")
-# GENOME.class <- set.populations(GENOME.class,list(1:3,4:8,9:12))
-# GENOME.class <- set.outgroup(GENOME.class,13)
-# GENOME.class <- introgression.stats(GENOME.class)
-# show the result:
-# GENOME.class@D
 
 ############ KaKs analysis in R -- KaKs.R
 ### runs under for a in *.fasta; do echo $a; Rscript kaks.R $a ${a%.fasta}; echo "done with $a"; done
@@ -1176,23 +975,6 @@ awk '{ print $1 "\t" $2 "\t" $3 "\t" $10 "\t" $5 "\t" $6 }' D5.bed > D5.names.be
 # extract D genes
 bedtools getfasta -fi Dgenome2_13.fasta -bed D5.names.bed -fo Dgenes.fasta -name -s
 faidx -x Dgenes.fasta  ## from pyfaidx 0.4.7.1
-
-##### 3 seq didn't like the phylip files produced by clustalw2
-
-##### run alignments through RDP4 with all methods selected
-## 559 total alignments
-## 433 no detected conversion
-## 66 possible conversion events (of which 9/53 have been confirmed as possible; see RDP4.results.xlsx)
-## 60 “overflow errors” -- program errors not linked to alignment qualities
-
-##### reasons why our dataset cannot extensively detect gene conversion
-## our reads are only 150nt (at most)
-## our fragments average 400-600 nt
-## polyCat is set up to minimize gene conversion
-## what can we say with our data?
-#### we can look at SE AD bins of polycat to find reads where gene conversion exists in adjacent SNPs -- limited to find junctions within 150nt reads
-######## can set polyCat to a different % vote: polyCat -p 1 -v 1 -x 1 -s /home/jfw-lab-local/gmap/D5/snpindex${array[3]}/D13.snp${array[3]} ${array[4]}.sort.bam &>> ${array[4]}.log
-#### can also find regions of conversion by looking for holes in alignments which can be filled in by the AD bin
 
 ##################################################################################################################
 ###################################### begin AD2 analyses ######################################
